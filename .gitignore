@@ -1,12 +1,23 @@
-# IntelliJ project files
+# Eclipse / IDEA project files
 .idea
 *.iml
 out
 gen
+.classpath
+.project
+.settings/
+*.ipr
+*.iws
 
 # Build files
 build
 .gradle
+
+# Patch files
+*.patch
+
+# Local mods folder
+mods/
 
 # Project specific
 steam_appid.txt

@@ -1,16 +1,18 @@
 plugins {
     id 'java'
+    id 'eclipse'
+    id 'idea'
 }
 
 // Change the values below this to your mods values
 // To change the project name, edit the settings.gradle file
 
-project.ext.modID = "streetnoodle.autosummon" // The unique id of your mod. Must be all lowercase and cannot use special characters.
+project.ext.modID = "xeraphire.autosummon" // The unique id of your mod. Must be all lowercase and cannot use special characters.
 project.ext.modName = "Auto Summon" // The display name of your mod.
-project.ext.modVersion = "1.8.1" // Your current builds version. Must follow the xx.xx... format.
-project.ext.gameVersion = "1.0.1" // The target game version.
+project.ext.modVersion = "2.0.5" // Your current builds version. Must follow the xx.xx... format.
+project.ext.gameVersion = "1.3.2" // The target game version.
 project.ext.modDescription = "Automatically summons using the rightmost staff in your hotbar" // Short description of what your mod is.
-project.ext.author = "Street Noodle" // Your name
+project.ext.author = "Xeraphire" // Your name
 
 /**
  * When setting clientside to true, it means servers do not need this mod for clients to connect and vice versa.
@@ -28,7 +30,9 @@ project.ext.clientside = false
 //project.ext.modOptionalDependencies = ["optional.modid1", "optional.modid2"]
 
 // The path to the games install directory
-def gameDirectory = "C:/SteamLibrary/steamapps/common/Necesse"
+def gameDirectory = System.getProperty("os.name").toLowerCase().contains("mac") ?
+    System.getProperty("user.home") + "/Library/Application Support/Steam/steamapps/common/Necesse/Necesse.app/Contents/Resources" :
+    "C:/SteamLibrary/steamapps/common/Necesse"
 
 // =================================================
 // ========== DO NOT EDIT BELOW THIS LINE ==========
@@ -145,7 +149,7 @@ task buildModJar(type: Jar) {
     dependsOn "classes"
 
     doFirst {
-        fileTree(dir: buildLocation).exclude("${jarName}.jar").visit { FileVisitDetails details ->
+        fileTree(dir: buildLocation).exclude("${jarName}.jar").visit { details ->
             delete details.file
         }
     }

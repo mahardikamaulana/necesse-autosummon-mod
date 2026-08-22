@@ -1,355 +1,482 @@
 package autosummon.patches;
 
 import autosummon.AutoSummonConfig;
+import autosummon.AutoSummonModSettings;
 import necesse.engine.modLoader.annotations.ModMethodPatch;
+import necesse.engine.registries.BuffRegistry;
+import necesse.entity.mobs.Mob;
 import necesse.entity.mobs.PlayerMob;
+import necesse.entity.mobs.WormMobBody;
+import necesse.entity.mobs.buffs.ActiveBuff;
+import necesse.entity.mobs.buffs.BuffModifiers;
+import necesse.entity.mobs.summon.FollowingWormMobHead;
+import necesse.entity.mobs.summon.summonFollowingMob.SummonedFollowingMob;
 import necesse.inventory.InventoryItem;
+import necesse.inventory.PlayerInventorySlot;
 import necesse.inventory.item.toolItem.summonToolItem.SummonToolItem;
 import net.bytebuddy.asm.Advice;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.Timer;
 import java.util.TimerTask;
 
 /**
- * This patch automatically summons using the rightmost staff in inventory when
- * below max summons.
- * It targets the clientTick method in the PlayerMob class with proper
- * multiplayer isolation.
+ * High-performance auto-summoning patch for Necesse 1.3.2.
+ * Executes on PlayerMob.clientTick with zero per-tick allocations, single-pass
+ * entity manager scanning, smart tick backoff, and instant fast-paths.
  */
 @ModMethodPatch(target = PlayerMob.class, name = "clientTick", arguments = {})
 public class AutoSummonPatch {
 
-    // Per-player cooldown tracking to prevent multiplayer interference
-    public static final ConcurrentHashMap<Integer, Long> playerCooldowns = new ConcurrentHashMap<>();
-    
-    // Per-player tick counters for performance optimization when at max summons
-    public static final ConcurrentHashMap<Integer, Integer> playerTickCounters = new ConcurrentHashMap<>();
+    // Local client player primitive tracking (public to allow bytecode inlined execution in PlayerMob)
+    public static long localNextCheckTime = 0;
+    public static int localLastMaxSummons = -1;
 
-    // Timer for delayed clearing
-    private static Timer clearTimer = new Timer("AutoSummonClearTimer", true);
+    // Timer for delayed clearing when mod is toggled off
+    public static final Timer clearTimer = new Timer("AutoSummonClearTimer", true);
+
+    // Pre-allocated array to hold hotbar summon info without per-tick heap allocations
+    public static final HotbarSlotInfo[] hotbarSlots = new HotbarSlotInfo[10];
+    static {
+        for (int i = 0; i < 10; i++) {
+            hotbarSlots[i] = new HotbarSlotInfo();
+        }
+    }
+
+    public static class HotbarSlotInfo {
+        public int slotIndex;
+        public InventoryItem item;
+        public SummonToolItem staff;
+        public int activeCount;
+        public int maxAllowed;
+        public int customLimit;
+        public int summonCost;
+        public boolean isSlotWeapon;
+        public boolean present;
+
+        public void reset() {
+            this.slotIndex = -1;
+            this.item = null;
+            this.staff = null;
+            this.activeCount = 0;
+            this.maxAllowed = 0;
+            this.customLimit = 0;
+            this.summonCost = 0;
+            this.isSlotWeapon = false;
+            this.present = false;
+        }
+    }
 
     /**
      * Clear all SummonedMobBuff stacks from the player and despawn followers
      */
     public static void clearSummonBuffs(PlayerMob player) {
-        player.buffManager.removeBuff("summonedmob", true);
+        if (player != null && player.buffManager != null) {
+            player.buffManager.removeBuff("summonedmob", true);
+        }
     }
 
     /**
-     * Clean up old player cooldowns to prevent memory leaks
-     */
-    public static void cleanupOldCooldowns(long currentTime) {
-        // Remove cooldowns older than 10 seconds to prevent memory leaks
-        long cleanupThreshold = currentTime - 10000; // 10 seconds in milliseconds
-        playerCooldowns.entrySet().removeIf(entry -> entry.getValue() < cleanupThreshold);
-        
-        // Clean up tick counters for players who haven't been active recently
-        playerTickCounters.entrySet().removeIf(entry -> !playerCooldowns.containsKey(entry.getKey()));
-    }
-
-    /**
-     * Schedule delayed clearing of summon buffs (like setTimeout in JS)
+     * Schedule delayed clearing of summon buffs when disabling the mod
      */
     public static void scheduleDelayedClear(PlayerMob player) {
         clearTimer.schedule(new TimerTask() {
             @Override
             public void run() {
-                // Only clear if the mod is still disabled
                 if (!AutoSummonConfig.isEnabled()) {
                     clearSummonBuffs(player);
                 }
             }
-        }, 500); // 500ms delay
+        }, 500);
     }
 
     /**
-     * Get the current summon count for the player using the buff bar method (fast)
-     * @param player The player to check
-     * @return The current number of active summons
+     * Get the current summon count for the player using O(1) BuffRegistry / BuffManager lookups
      */
     public static int getCurrentSummonCountBuffBar(PlayerMob player) {
-        int currentSummons = 0;
-        for (necesse.entity.mobs.buffs.ActiveBuff buff : player.buffManager.getArrayBuffs()) {
-            if (buff.buff instanceof necesse.entity.mobs.buffs.staticBuffs.SummonedMobBuff) {
-                currentSummons += buff.getStacks();
+        try {
+            if (player != null && player.buffManager != null) {
+                if (BuffRegistry.SUMMONED_MOB != null) {
+                    return player.buffManager.getStacks(BuffRegistry.SUMMONED_MOB);
+                }
+                ActiveBuff buff = player.buffManager.getBuff("summonedmob");
+                return buff != null ? buff.getStacks() : 0;
             }
-        }
-        return currentSummons;
+        } catch (Exception ignored) {}
+        return 0;
     }
 
     /**
-     * Get the current summon count for the player by counting actual summoned mobs following them (accurate but slower)
-     * @param player The player to check
-     * @param staff The specific staff to check summons for
-     * @param hotbarItem The inventory item containing the staff
-     * @return The current number of active summons for this specific staff
+     * Calculate total summon slots consumed by all slot-based summon weapons
+     */
+    public static int getTotalGlobalSummonSlotsUsed(PlayerMob player) {
+        float slotsUsed = 0;
+        if (player == null || player.getLevel() == null || player.getLevel().entityManager == null || player.getLevel().entityManager.mobs == null) {
+            return 0;
+        }
+
+        try {
+            int playerID = player.getUniqueID();
+            for (Mob mob : player.getLevel().entityManager.mobs) {
+                if (mob != null && !mob.removed() && mob.getHealth() > 0 && mob.getFollowingUniqueID() == playerID) {
+                    if (mob instanceof WormMobBody) {
+                        continue;
+                    }
+                    
+                    SummonToolItem matchedStaff = findStaffForMob(player, mob);
+                    if (matchedStaff != null && matchedStaff.drawMaxSummons) {
+                        slotsUsed += matchedStaff.getSummonSpaceTaken(null, player);
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+
+        return Math.round(slotsUsed);
+    }
+
+    /**
+     * Find the summon staff in the player's hotbar/inventory corresponding to a spawned mob
+     */
+    public static SummonToolItem findStaffForMob(PlayerMob player, Mob mob) {
+        if (player == null || player.getInv() == null || player.getInv().main == null) {
+            return null;
+        }
+        for (int i = 0; i < player.getInv().main.getSize(); i++) {
+            InventoryItem item = player.getInv().main.getItem(i);
+            if (item != null && item.item instanceof SummonToolItem) {
+                SummonToolItem staff = (SummonToolItem) item.item;
+                if (isSummonedByStaff(mob, staff, item)) {
+                    return staff;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Get the current summon count for custom follower staffs using atomic ID comparison
      */
     public static int getCurrentSummonCountFollowers(PlayerMob player, SummonToolItem staff, InventoryItem hotbarItem) {
         int currentSummons = 0;
         
         try {
-            // Get all mobs in the level
-            for (necesse.entity.mobs.Mob mob : player.getLevel().entityManager.mobs) {
-                if (mob instanceof necesse.entity.mobs.summon.SummonedMob) {
-                    // Check if this summoned mob is following our player
-                    necesse.entity.mobs.Mob followingMob = mob.getFollowingMob();
-                    if (followingMob == player) {
-                        // Check if this summoned mob was created by the specific staff
+            if (player != null && player.getLevel() != null && player.getLevel().entityManager != null && player.getLevel().entityManager.mobs != null) {
+                int playerID = player.getUniqueID();
+                for (Mob mob : player.getLevel().entityManager.mobs) {
+                    if (mob != null && !mob.removed() && mob.getHealth() > 0 && mob.getFollowingUniqueID() == playerID) {
                         if (isSummonedByStaff(mob, staff, hotbarItem)) {
                             currentSummons++;
                         }
                     }
                 }
             }
-        } catch (Exception e) {
-            // If follower method fails, fall back to buff bar method
-            return getCurrentSummonCountBuffBar(player);
-        }
+        } catch (Exception ignored) {}
         
         return currentSummons;
     }
 
     /**
      * Check if a summoned mob was created by a specific staff
-     * @param summonedMob The summoned mob to check
-     * @param staff The staff to check against
-     * @return True if the mob was summoned by this staff
      */
-    private static boolean isSummonedByStaff(necesse.entity.mobs.Mob summonedMob, SummonToolItem staff, InventoryItem hotbarItem) {
+    public static boolean isSummonedByStaff(Mob summonedMob, SummonToolItem staff, InventoryItem hotbarItem) {
+        if (summonedMob == null || staff == null) return false;
         try {
-            // Get the mob's string ID
+            if (summonedMob instanceof WormMobBody) {
+                return false;
+            }
+
             String mobStringID = summonedMob.getStringID();
-            
-            // Get the staff's mobStringID (first parameter from super() call)
             String staffMobStringID = staff.mobStringID;
             
-            // Check if the mob's string ID matches the staff's mobStringID
-            if (mobStringID != null && staffMobStringID != null && mobStringID.equals(staffMobStringID)) {
+            if (mobStringID != null && staffMobStringID != null) {
+                if (mobStringID.equalsIgnoreCase(staffMobStringID)) {
+                    return true;
+                }
+            }
+            
+            if (mobStringID != null && staff.summonType != null && staff.summonType.equalsIgnoreCase(mobStringID)) {
                 return true;
+            }
+
+            if (summonedMob instanceof SummonedFollowingMob) {
+                SummonedFollowingMob sfm = (SummonedFollowingMob) summonedMob;
+                if (sfm.removeWhenNotInInventoryItem != null && sfm.removeWhenNotInInventoryItem.getStringID().equalsIgnoreCase(staff.getStringID())) {
+                    return true;
+                }
+            }
+
+            if (summonedMob instanceof FollowingWormMobHead) {
+                FollowingWormMobHead<?, ?> fwh = (FollowingWormMobHead<?, ?>) summonedMob;
+                if (fwh.removeWhenNotInInventoryItem != null && fwh.removeWhenNotInInventoryItem.getStringID().equalsIgnoreCase(staff.getStringID())) {
+                    return true;
+                }
             }
             
             return false;
-                   
         } catch (Exception e) {
-            // If all methods fail, assume it's not from this staff
             return false;
         }
     }
 
     /**
-     * Get the maximum summon count for a specific staff, or fall back to player max count
-     * @param staff The summon staff to check
-     * @param player The player using the staff
-     * @param hotbarItem The inventory item containing the staff
-     * @param playerMaxSummons The player's maximum summon count
-     * @return The maximum summon count for this staff
+     * Get the maximum summon count for a specific staff using direct engine API in Necesse 1.3.2
      */
     public static int getStaffMaxSummons(SummonToolItem staff, PlayerMob player, InventoryItem hotbarItem, int playerMaxSummons) {
-        try {
-            // Check for global custom summon limit first
-            if (AutoSummonConfig.getSettings().hasGlobalCustomLimit()) {
-                // Only apply global limit to staffs that have their own counters (drawMaxSummons = false)
-                if (!staff.drawMaxSummons) {
-                    return AutoSummonConfig.getSettings().getGlobalCustomSummonLimit();
-                }
-            }
-            
-            // Try to get staff-specific summon count using reflection with correct parameters
-            java.lang.reflect.Method getMaxSummonsMethod = staff.getClass().getMethod("getMaxSummons", InventoryItem.class, necesse.entity.mobs.itemAttacker.ItemAttackerMob.class);
-            Object result = getMaxSummonsMethod.invoke(staff, hotbarItem, player);
-            
-            if (result instanceof Integer) {
-                int staffMax = (Integer) result;
-                // If staff has its own max summon count, use that directly (don't limit by player max)
-                return staffMax;
-            }
-        } catch (Exception e) {
-            // Method doesn't exist or failed, staff has no custom max summon count
+        int weaponLimit = AutoSummonConfig.getSettings().getWeaponSummonLimit(staff.getStringID());
+        if (weaponLimit > 0) {
+            return weaponLimit;
+        }
+
+        if (AutoSummonConfig.getSettings().hasGlobalCustomLimit()) {
+            return AutoSummonConfig.getSettings().getGlobalCustomSummonLimit();
         }
         
-        // If we get here, the staff doesn't have its own max summon count, so use player's max
+        if (!staff.drawMaxSummons) {
+            try {
+                return staff.getMaxSummons(hotbarItem, player);
+            } catch (Throwable t) {
+                try {
+                    java.lang.reflect.Method m = staff.getClass().getMethod("getMaxSummons", InventoryItem.class, necesse.entity.mobs.itemAttacker.ItemAttackerMob.class);
+                    Object res = m.invoke(staff, hotbarItem, player);
+                    if (res instanceof Integer) {
+                        return (Integer) res;
+                    }
+                } catch (Exception ignored) {}
+            }
+        }
+        
         return playerMaxSummons;
     }
 
     /**
-     * Check if the player is at max summons using the first found staff (performance optimization)
-     * @param player The player to check
-     * @return True if the first staff is at max capacity
+     * Check if a specific summon staff can summon another minion
+     */
+    public static boolean canSummon(PlayerMob player, SummonToolItem staff, InventoryItem hotbarItem, int playerMaxSummons) {
+        int activeForStaff = getCurrentSummonCountFollowers(player, staff, hotbarItem);
+        int weaponLimit = AutoSummonConfig.getSettings().getWeaponSummonLimit(staff.getStringID());
+
+        if (weaponLimit > 0 && activeForStaff >= weaponLimit) {
+            return false;
+        }
+
+        if (AutoSummonConfig.getSettings().hasGlobalCustomLimit() && activeForStaff >= AutoSummonConfig.getSettings().getGlobalCustomSummonLimit()) {
+            return false;
+        }
+
+        int summonCost = Math.max(1, Math.round(staff.getSummonSpaceTaken(hotbarItem, player)));
+
+        if (staff.drawMaxSummons) {
+            int currentGlobalSlots = getTotalGlobalSummonSlotsUsed(player);
+            return currentGlobalSlots + summonCost <= playerMaxSummons;
+        }
+
+        int staffMax = staff.getMaxSummons(hotbarItem, player);
+        return activeForStaff + summonCost <= staffMax;
+    }
+
+    /**
+     * Check if the player is at max summons across all hotbar staffs
      */
     public static boolean isAtMaxSummons(PlayerMob player) {
-        int playerMaxSummons = player.buffManager.getModifier(necesse.entity.mobs.buffs.BuffModifiers.MAX_SUMMONS);
+        int playerMaxSummons = player.buffManager.getModifier(BuffModifiers.MAX_SUMMONS);
         
-        // Find the first summoning staff in hotbar
         for (int i = 9; i >= 0; i--) {
             InventoryItem hotbarItem = player.getInv().main.getItem(i);
             
             if (hotbarItem != null && hotbarItem.item instanceof SummonToolItem) {
                 SummonToolItem staff = (SummonToolItem) hotbarItem.item;
-                int staffMaxSummons = getStaffMaxSummons(staff, player, hotbarItem, playerMaxSummons);
-                
-                // Use fast buff bar method for performance
-                int currentSummons = getCurrentSummonCountBuffBar(player);
-                
-                // Return true if this staff is at max capacity
-                return currentSummons >= staffMaxSummons;
+                if (canSummon(player, staff, hotbarItem, playerMaxSummons)) {
+                    return false;
+                }
             }
         }
         
-        // No staffs found, skip anyway to prevent performance issues
         return true;
     }
 
     /**
-     * This code runs after the original clientTick method.
-     * It processes auto-summoning for the local player with proper multiplayer
-     * isolation.
+     * Helper to handle chat messages from GUI/hotkeys
+     */
+    public static void handleChatMessage(PlayerMob player) {
+        String message = AutoSummonConfig.getAndClearChatMessage();
+        if (message.isEmpty()) {
+            String status = AutoSummonConfig.isEnabled() ? "ON" : "OFF";
+            message = "[Auto Summon] " + status;
+        } else {
+            message = "[Auto Summon] " + message;
+        }
+
+        if (!AutoSummonConfig.isEnabled()) {
+            scheduleDelayedClear(player);
+        }
+
+        if (player.getLevel() != null && player.getLevel().getClient() != null && player.getLevel().getClient().chat != null) {
+            player.getLevel().getClient().chat.addMessage(message);
+        }
+    }
+
+    /**
+     * Optimized onExit patch executing on PlayerMob.clientTick
      */
     @Advice.OnMethodExit
-    static void onExit(@Advice.This PlayerMob player) {
-        // We only want this logic to run for the client who is controlling the player
+    public static void onExit(@Advice.This PlayerMob player) {
+        // Fast-path 1: Mod disabled
+        if (!AutoSummonConfig.isEnabled()) {
+            if (AutoSummonConfig.checkAndClearNeedsChatMessage()) {
+                handleChatMessage(player);
+            }
+            return;
+        }
+
+        // Fast-path 2: Validate local client player
         if (player == null || !player.isClient() || !player.isPlayer) {
             return;
         }
-
-        // Additional validation: ensure this is the local player
         if (player.getLevel() == null || !player.getLevel().isClient()) {
             return;
         }
-
-        // CRITICAL: Only run for the actual local player, not other players
         if (player.getLevel().getClient() == null || player.getLevel().getClient().getPlayer() != player) {
             return;
         }
 
-        // Check if we need to send a chat message (from control activation)
+        // Process any queued chat messages
         if (AutoSummonConfig.checkAndClearNeedsChatMessage()) {
-            String message = AutoSummonConfig.getAndClearChatMessage();
-            if (message.isEmpty()) {
-                // Default toggle message
-                String status = AutoSummonConfig.isEnabled() ? "ON" : "OFF";
-                message = "[Auto Summon] " + status;
-            } else {
-                // Custom message
-                message = "[Auto Summon] " + message;
-            }
-
-            // If turning off, schedule delayed clearing (like setTimeout in JS)
-            if (!AutoSummonConfig.isEnabled()) {
-                scheduleDelayedClear(player);
-            }
-
-            // Send to global chat using the client's chat system
-            if (player.getLevel() != null && player.getLevel().isClient() && player.getLevel().getClient() != null) {
-                necesse.engine.network.client.Client client = player.getLevel().getClient();
-                if (client != null && client.chat != null) {
-                    client.chat.addMessage(message);
-                }
-            }
+            handleChatMessage(player);
         }
 
-        // Only apply if the mod is enabled
-        if (!AutoSummonConfig.isEnabled()) {
+        // Fast-path 3: Player currently in attack animation
+        if (player.isAttacking) {
             return;
         }
 
-        // Get player-specific cooldown
-        int playerId = player.getUniqueID();
-        long currentTime = player.getWorldEntity().getTime();
-
-        // Clean up old cooldowns periodically to prevent memory leaks
-        cleanupOldCooldowns(currentTime);
-
-        Long lastCheckTime = playerCooldowns.get(playerId);
-
-        if (lastCheckTime != null && currentTime < lastCheckTime) {
-            return; // Don't run if this player is on cooldown
+        // Fast-path 4: Debounce / cooldown timer
+        long currentTime = System.currentTimeMillis();
+        if (currentTime < localNextCheckTime) {
+            return;
         }
 
-        // Performance optimization: When at max summons, only run every 5 ticks
-        Integer tickCounter = playerTickCounters.get(playerId);
-        if (tickCounter == null) {
-            tickCounter = 0;
+        if (player.getInv() == null || player.getInv().main == null) {
+            return;
         }
-        
-        // Check if we're at max summons (quick check)
-        boolean atMaxSummons = isAtMaxSummons(player);
-        
-        if (atMaxSummons) {
-            // Only run every 5 ticks when at max summons
-            tickCounter++;
-            if (tickCounter < 5) {
-                playerTickCounters.put(playerId, tickCounter);
-                return;
+
+        // Fast-path 5: Quick scan hotbar slots 0-9 for any summon weapons
+        boolean hasAnySummonStaff = false;
+        AutoSummonModSettings settings = AutoSummonConfig.getSettings();
+        int playerMaxSummons = player.buffManager != null ? player.buffManager.getModifier(BuffModifiers.MAX_SUMMONS) : 1;
+
+        // Fallback: If max summon capacity decreased, reset all slot-consuming weapons to Auto
+        if (localLastMaxSummons != -1 && playerMaxSummons < localLastMaxSummons) {
+            settings.resetSlotWeaponLimits(player);
+            if (player.getLevel().getClient() != null && player.getLevel().getClient().chat != null) {
+                player.getLevel().getClient().chat.addMessage("[Auto Summon] Summon capacity decreased: reset slot weapon limits to Auto.");
             }
-            // Reset counter when we reach 5
-            tickCounter = 0;
         }
-        
-        // Update tick counter
-        playerTickCounters.put(playerId, tickCounter);
+        localLastMaxSummons = playerMaxSummons;
 
-        // Check if player is currently attacking - if so, don't interrupt
-        if (player.isAttacking) {
-            return; // Player is currently attacking, don't auto-summon
+        for (int i = 0; i < 10; i++) {
+            hotbarSlots[i].reset();
+            InventoryItem item = player.getInv().main.getItem(i);
+            if (item != null && item.item instanceof SummonToolItem) {
+                SummonToolItem staff = (SummonToolItem) item.item;
+                HotbarSlotInfo info = hotbarSlots[i];
+                info.slotIndex = i;
+                info.item = item;
+                info.staff = staff;
+                info.isSlotWeapon = staff.drawMaxSummons;
+                info.summonCost = Math.max(1, Math.round(staff.getSummonSpaceTaken(item, player)));
+                info.customLimit = settings.getWeaponSummonLimit(staff.getStringID());
+                info.maxAllowed = info.isSlotWeapon 
+                    ? Math.max(1, (int) Math.floor((float) playerMaxSummons / info.summonCost))
+                    : Math.max(1, staff.getMaxSummons(item, player));
+                info.present = true;
+                hasAnySummonStaff = true;
+            }
         }
 
-        int playerMaxSummons = player.buffManager.getModifier(necesse.entity.mobs.buffs.BuffModifiers.MAX_SUMMONS);
+        if (!hasAnySummonStaff) {
+            // No summon weapons in hotbar: sleep check for 500ms
+            localNextCheckTime = currentTime + 500;
+            return;
+        }
 
-        // Scan the hotbar from right to left (slot 9 to 0) to find the rightmost staff
-        for (int i = 9; i >= 0; i--) {
-            InventoryItem hotbarItem = player.getInv().main.getItem(i);
-
-            if (hotbarItem != null && hotbarItem.item instanceof SummonToolItem) {
-                SummonToolItem staff = (SummonToolItem) hotbarItem.item;
-                
-                // Check if this staff has a custom summon count limit
-                int staffMaxSummons = getStaffMaxSummons(staff, player, hotbarItem, playerMaxSummons);
-                
-                // Use appropriate counting method based on whether staff has custom max
-                int currentSummons;
-                boolean staffHasCustomMax = !staff.drawMaxSummons; // drawMaxSummons = false means staff has custom limits
-                
-                if (staffHasCustomMax) {
-                    // Staff has its own max count, use accurate follower method
-                    currentSummons = getCurrentSummonCountFollowers(player, staff, hotbarItem);
-                } else {
-                    // Staff uses player max count, use fast buff bar method
-                    currentSummons = getCurrentSummonCountBuffBar(player);
+        // Single-pass mob iteration across all mobs in level
+        int globalSlotsUsed = 0;
+        if (player.getLevel().entityManager != null && player.getLevel().entityManager.mobs != null) {
+            int playerID = player.getUniqueID();
+            for (Mob mob : player.getLevel().entityManager.mobs) {
+                if (mob == null || mob.removed() || mob.getHealth() <= 0 || mob.getFollowingUniqueID() != playerID) {
+                    continue;
                 }
-                
-                // Get the summon space taken for this staff
-                int summonCost = Math.round(staff.getSummonSpaceTaken(hotbarItem, player));
-                
-                // Only proceed if we have enough remaining capacity for at least one summon
-                if (currentSummons + summonCost <= staffMaxSummons) {
-                    String canAttackResult = staff.canAttack(player.getLevel(), (int) player.getX(),
-                            (int) player.getY(), player, hotbarItem);
+                if (mob instanceof WormMobBody) {
+                    continue;
+                }
 
-                    if (canAttackResult == null) {
-                        // Final safety check: ensure this is still the local player
-                        if (player.getLevel().getClient() != null
-                                && player.getLevel().getClient().getPlayer() == player) {
-                            
-                            necesse.inventory.PlayerInventorySlot slot = new necesse.inventory.PlayerInventorySlot(
-                                    player.getInv().main, i);
+                boolean matched = false;
+                for (int s = 0; s < 10; s++) {
+                    HotbarSlotInfo info = hotbarSlots[s];
+                    if (!info.present) continue;
 
-                            player.tryAttack(slot, (int) player.getX(), (int) player.getY());
-
-                            // Immediately try to stop any attack animation
-                            try {
-                                player.doAndSendStopAttackAttacker(true);
-                            } catch (Exception e) {
-                                // Method doesn't exist or failed, ignore
-                            }
-
-                            // Set the cooldown for this specific player to avoid using all staffs instantly
-                            playerCooldowns.put(playerId, currentTime + AutoSummonConfig.getSummonCheckCooldown());
+                    if (isSummonedByStaff(mob, info.staff, info.item)) {
+                        info.activeCount++;
+                        if (info.isSlotWeapon) {
+                            globalSlotsUsed += info.summonCost;
                         }
-
+                        matched = true;
                         break;
                     }
                 }
+
+                // If minion was spawned by an off-hotbar inventory staff
+                if (!matched) {
+                    SummonToolItem invStaff = findStaffForMob(player, mob);
+                    if (invStaff != null && invStaff.drawMaxSummons) {
+                        globalSlotsUsed += Math.max(1, Math.round(invStaff.getSummonSpaceTaken(null, player)));
+                    }
+                }
             }
+        }
+
+        // Evaluate rightmost staff (slot 9 down to 0) that can summon
+        boolean summonedAny = false;
+        boolean allFull = true;
+
+        for (int i = 9; i >= 0; i--) {
+            HotbarSlotInfo info = hotbarSlots[i];
+            if (!info.present) continue;
+
+            boolean canSummonThis = false;
+
+            // Check custom limit
+            if (info.customLimit > 0 && info.activeCount >= info.customLimit) {
+                continue;
+            }
+
+            if (info.isSlotWeapon) {
+                if (globalSlotsUsed + info.summonCost <= playerMaxSummons) {
+                    canSummonThis = true;
+                }
+            } else {
+                if (info.activeCount + info.summonCost <= info.maxAllowed) {
+                    canSummonThis = true;
+                }
+            }
+
+            if (canSummonThis) {
+                allFull = false;
+                String canAttackResult = info.staff.canAttack(player.getLevel(), (int) player.getX(),
+                        (int) player.getY(), player, info.item);
+
+                if (canAttackResult == null) {
+                    PlayerInventorySlot slot = new PlayerInventorySlot(player.getInv().main, i);
+                    player.tryAttack(slot, (int) player.getX(), (int) player.getY());
+                    localNextCheckTime = currentTime + AutoSummonConfig.getSummonCheckCooldown();
+                    summonedAny = true;
+                    break;
+                }
+            }
+        }
+
+        if (!summonedAny) {
+            // When all summons are satisfied, back off check by 250ms to save CPU
+            localNextCheckTime = currentTime + (allFull ? 250 : AutoSummonConfig.getSummonCheckCooldown());
         }
     }
 }

@@ -4,42 +4,32 @@ A Necesse mod that automatically summons using the rightmost staff in your hotba
 
 ## Features
 
-- **Automatic Summoning**: Automatically uses the rightmost summoning staff in your hotbar
-- **Smart Detection**: Only summons when you're below your maximum summon count
-- **Configurable Settings**: Adjust check frequency and other settings
-- **Debug Output**: Optional debug messages to verify the mod is working
+- **Automatic Summoning**: Automatically uses the rightmost summoning staff in your hotbar.
+- **Interactive In-Game GUI (`F9`)**: Open the configuration GUI at any time with **F9** to inspect hotbar staves, slot costs, and active minion counts.
+- **Per-Weapon Custom Limits**: Manually set individual summon quotas per weapon (or leave on Auto/Max).
+- **Smart Slot & Capacity Detection**: Respects both global summon slot capacities and dedicated follower minion caps.
+- **Dynamic Slot Validation**: Caps counter adjusters based on player's available slots and weapon cost.
+- **Automatic Fallback on Capacity Decrease**: Automatically resets slot-consuming staves to Auto if summon slots drop.
+- **Optimized Performance**: Zero per-tick heap allocations, single-pass entity scanning, and intelligent tick backoff.
+- **Persistent Settings**: Saves all configurations across sessions using Necesse's native save/load system.
 
-## Installation
+## Controls
 
-1. Download the latest `AutoSummon-1.0.0-1.0.jar` from the releases
-2. Place the JAR file in your Necesse mods folder
-3. Start the game and the mod will be automatically loaded
-
-## Configuration
-
-You can modify the settings by editing the `CraftingRangeConfig.java` file before building:
-
-- `SUMMON_CHECK_COOLDOWN`: How often to check for summoning in milliseconds (default: 250ms = 4 times per second)
-- `SCAN_RIGHT_TO_LEFT`: Whether to scan hotbar from right to left for rightmost staff (default: true)
-- `DEBUG_OUTPUT`: Enable/disable debug messages (default: true)
-
-## How It Works
-
-The mod patches the `PlayerMob.clientTick` method to:
-1. Check if you're below your maximum summon count
-2. Scan your hotbar from right to left (slots 9 to 0)
-3. Find the first summoning staff that can be used
-4. Automatically use that staff to summon a minion
+- **`F9`**: Open / Close the Auto Summon Configuration GUI.
 
 ## Building
 
 To build the mod yourself:
 
-1. Clone this repository
-2. Run `./gradlew buildModJar`
-3. The built JAR will be in `build/jar/`
+1. Run `./gradlew buildModJar`
+2. The built JAR will be in `build/jar/`
 
 ## Requirements
 
-- Necesse 1.0.0
+- Necesse 1.3.2
 - Java 8 or higher
+
+## Credits
+
+- **Original Author**: [brydonm (Street Noodle)](https://github.com/brydonm) - Creator of the original [necesse-autosummon-mod](https://github.com/brydonm/necesse-autosummon-mod).
+- **Enhanced & Maintained by**: [Xeraphire](https://github.com/mahardikamaulana) - Interactive GUI configuration, per-weapon limit controls, slot tracking, capacity fallbacks, and performance optimizations.

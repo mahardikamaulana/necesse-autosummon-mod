@@ -7,15 +7,14 @@ package autosummon;
 public class AutoSummonConfig {
     
     // Main configuration values
-    public static final long SUMMON_CHECK_COOLDOWN = 250; // ms. How often to check for summoning (4 times/sec)
+    public static final long SUMMON_CHECK_COOLDOWN = 50; // ms debounce (matches 20 ticks/sec game tick rate)
     
     // Runtime toggle state - now managed by persistent settings
     private static AutoSummonModSettings settings;
     private static boolean needsChatMessage = false;
     private static String chatMessage = "";
     
-    // Control for toggling auto-summon
-    public static necesse.engine.input.Control TOGGLE_AUTO_SUMMON;
+    // Control for opening auto-summon settings GUI
     public static necesse.engine.input.Control SETTINGS_CONTROL;
     
     /**
@@ -94,11 +93,8 @@ public class AutoSummonConfig {
      * Initialize the control
      */
     public static void initControl() {
-        TOGGLE_AUTO_SUMMON = necesse.engine.input.Control.addModControl(
-            new AutoSummonControl() // F9 key
-        );
         SETTINGS_CONTROL = necesse.engine.input.Control.addModControl(
-            new AutoSummonSettingsControl() // F10 key
+            new AutoSummonSettingsControl() // F9 key
         );
     }
     
