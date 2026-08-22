@@ -1,6 +1,8 @@
 # Auto Summon
 
-A Necesse mod that automatically casts summon weapons in your hotbar when below your summon limit.
+Tired of manually spam-recasting all your minions every time you die, travel between islands, or enter a dungeon?
+
+**Auto Summon** takes the tedious micromanagement out of summoner builds by automatically casting the summoning staves in your hotbar whenever you're below your minion limit. Mix and match different staves, set custom summon limits per weapon, and stay focused on combat without ever having to pause and spam-click staves again.
 
 ## Features
 
