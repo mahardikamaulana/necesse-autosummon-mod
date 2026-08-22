@@ -22,3 +22,7 @@ mods/
 # Project specific
 steam_appid.txt
 latest-crash.log
+
+# Steam Workshop upload files
+*.vdf
+upload_workshop.sh
