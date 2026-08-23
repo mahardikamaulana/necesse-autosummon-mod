@@ -2,26 +2,28 @@ package autosummon.patches;
 
 import autosummon.AutoSummonConfig;
 import autosummon.AutoSummonModSettings;
+import autosummon.compat.SummonCompatRegistry;
+import autosummon.compat.SummonWeaponAdapter;
 import necesse.engine.modLoader.annotations.ModMethodPatch;
 import necesse.engine.registries.BuffRegistry;
 import necesse.entity.mobs.Mob;
 import necesse.entity.mobs.PlayerMob;
-import necesse.entity.mobs.WormMobBody;
 import necesse.entity.mobs.buffs.ActiveBuff;
 import necesse.entity.mobs.buffs.BuffModifiers;
-import necesse.entity.mobs.summon.FollowingWormMobHead;
-import necesse.entity.mobs.summon.summonFollowingMob.SummonedFollowingMob;
 import necesse.inventory.InventoryItem;
 import necesse.inventory.PlayerInventorySlot;
 import necesse.inventory.item.toolItem.summonToolItem.SummonToolItem;
 import net.bytebuddy.asm.Advice;
+
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Timer;
 import java.util.TimerTask;
 
 /**
  * High-performance auto-summoning patch for Necesse 1.3.2.
  * Executes on PlayerMob.clientTick with zero per-tick allocations, single-pass
- * entity manager scanning, smart tick backoff, and instant fast-paths.
+ * entity manager scanning, smart tick backoff, and modular mod compatibility.
  */
 @ModMethodPatch(target = PlayerMob.class, name = "clientTick", arguments = {})
 public class AutoSummonPatch {
@@ -29,6 +31,10 @@ public class AutoSummonPatch {
     // Local client player primitive tracking (public to allow bytecode inlined execution in PlayerMob)
     public static long localNextCheckTime = 0;
     public static int localLastMaxSummons = -1;
+
+    public static void resetCheckTimer() {
+        localNextCheckTime = 0;
+    }
 
     // Timer for delayed clearing when mod is toggled off
     public static final Timer clearTimer = new Timer("AutoSummonClearTimer", true);
@@ -44,7 +50,7 @@ public class AutoSummonPatch {
     public static class HotbarSlotInfo {
         public int slotIndex;
         public InventoryItem item;
-        public SummonToolItem staff;
+        public SummonWeaponAdapter adapter;
         public int activeCount;
         public int maxAllowed;
         public int customLimit;
@@ -55,7 +61,7 @@ public class AutoSummonPatch {
         public void reset() {
             this.slotIndex = -1;
             this.item = null;
-            this.staff = null;
+            this.adapter = null;
             this.activeCount = 0;
             this.maxAllowed = 0;
             this.customLimit = 0;
@@ -66,12 +72,37 @@ public class AutoSummonPatch {
     }
 
     /**
-     * Clear all SummonedMobBuff stacks from the player and despawn followers
+     * Clear all summon buffs and follower mobs from the player
      */
     public static void clearSummonBuffs(PlayerMob player) {
-        if (player != null && player.buffManager != null) {
-            player.buffManager.removeBuff("summonedmob", true);
-        }
+        if (player == null) return;
+        try {
+            if (player.buffManager != null) {
+                if (BuffRegistry.SUMMONED_MOB != null) {
+                    player.buffManager.removeBuff(BuffRegistry.SUMMONED_MOB, true);
+                }
+                player.buffManager.removeBuff("summonedmob", true);
+            }
+
+            // Despawn all active summoned following mobs attached to player (excluding mounts/pets)
+            if (player.getLevel() != null && player.getLevel().entityManager != null && player.getLevel().entityManager.mobs != null) {
+                int playerID = player.getUniqueID();
+                List<Mob> toRemoveList = new ArrayList<>();
+                for (Mob mob : player.getLevel().entityManager.mobs) {
+                    if (mob == null || mob.removed() || mob.getFollowingUniqueID() != playerID) continue;
+                    String stringID = mob.getStringID();
+                    if (stringID != null) {
+                        String lower = stringID.toLowerCase();
+                        if (lower.contains("pet") || lower.contains("mount")) continue;
+                    }
+                    if (mob.isMounted()) continue;
+                    toRemoveList.add(mob);
+                }
+                for (Mob mob : toRemoveList) {
+                    mob.remove();
+                }
+            }
+        } catch (Exception ignored) {}
     }
 
     /**
@@ -117,13 +148,13 @@ public class AutoSummonPatch {
             int playerID = player.getUniqueID();
             for (Mob mob : player.getLevel().entityManager.mobs) {
                 if (mob != null && !mob.removed() && mob.getHealth() > 0 && mob.getFollowingUniqueID() == playerID) {
-                    if (mob instanceof WormMobBody) {
+                    if (SummonCompatRegistry.isWormBody(mob)) {
                         continue;
                     }
-                    
-                    SummonToolItem matchedStaff = findStaffForMob(player, mob);
-                    if (matchedStaff != null && matchedStaff.drawMaxSummons) {
-                        slotsUsed += matchedStaff.getSummonSpaceTaken(null, player);
+
+                    SummonWeaponAdapter matchedAdapter = SummonCompatRegistry.findWeaponForMob(player, mob);
+                    if (matchedAdapter != null && matchedAdapter.isGlobalSlotWeapon(null, player)) {
+                        slotsUsed += matchedAdapter.getSummonSpaceCost(null, player);
                     }
                 }
             }
@@ -142,9 +173,9 @@ public class AutoSummonPatch {
         for (int i = 0; i < player.getInv().main.getSize(); i++) {
             InventoryItem item = player.getInv().main.getItem(i);
             if (item != null && item.item instanceof SummonToolItem) {
-                SummonToolItem staff = (SummonToolItem) item.item;
-                if (isSummonedByStaff(mob, staff, item)) {
-                    return staff;
+                SummonWeaponAdapter adapter = SummonCompatRegistry.getAdapter(item);
+                if (adapter != null && adapter.isMatchingMinion(mob, item)) {
+                    return (SummonToolItem) item.item;
                 }
             }
         }
@@ -152,25 +183,38 @@ public class AutoSummonPatch {
     }
 
     /**
-     * Get the current summon count for custom follower staffs using atomic ID comparison
+     * Get the current summon count for custom follower staffs
      */
-    public static int getCurrentSummonCountFollowers(PlayerMob player, SummonToolItem staff, InventoryItem hotbarItem) {
+    public static int getCurrentSummonCountFollowers(PlayerMob player, SummonWeaponAdapter adapter, InventoryItem hotbarItem) {
         int currentSummons = 0;
-        
+        if (player == null || adapter == null) return 0;
+
         try {
-            if (player != null && player.getLevel() != null && player.getLevel().entityManager != null && player.getLevel().entityManager.mobs != null) {
+            if (player.getLevel() != null && player.getLevel().entityManager != null && player.getLevel().entityManager.mobs != null) {
                 int playerID = player.getUniqueID();
                 for (Mob mob : player.getLevel().entityManager.mobs) {
                     if (mob != null && !mob.removed() && mob.getHealth() > 0 && mob.getFollowingUniqueID() == playerID) {
-                        if (isSummonedByStaff(mob, staff, hotbarItem)) {
+                        if (SummonCompatRegistry.isWormBody(mob)) {
+                            continue;
+                        }
+                        if (adapter.isMatchingMinion(mob, hotbarItem)) {
                             currentSummons++;
                         }
                     }
                 }
             }
         } catch (Exception ignored) {}
-        
+
         return currentSummons;
+    }
+
+    /**
+     * Legacy helper for SummonToolItem count
+     */
+    public static int getCurrentSummonCountFollowers(PlayerMob player, SummonToolItem staff, InventoryItem hotbarItem) {
+        if (staff == null) return 0;
+        SummonWeaponAdapter adapter = SummonCompatRegistry.getAdapter(hotbarItem);
+        return getCurrentSummonCountFollowers(player, adapter, hotbarItem);
     }
 
     /**
@@ -178,49 +222,20 @@ public class AutoSummonPatch {
      */
     public static boolean isSummonedByStaff(Mob summonedMob, SummonToolItem staff, InventoryItem hotbarItem) {
         if (summonedMob == null || staff == null) return false;
-        try {
-            if (summonedMob instanceof WormMobBody) {
-                return false;
-            }
-
-            String mobStringID = summonedMob.getStringID();
-            String staffMobStringID = staff.mobStringID;
-            
-            if (mobStringID != null && staffMobStringID != null) {
-                if (mobStringID.equalsIgnoreCase(staffMobStringID)) {
-                    return true;
-                }
-            }
-            
-            if (mobStringID != null && staff.summonType != null && staff.summonType.equalsIgnoreCase(mobStringID)) {
-                return true;
-            }
-
-            if (summonedMob instanceof SummonedFollowingMob) {
-                SummonedFollowingMob sfm = (SummonedFollowingMob) summonedMob;
-                if (sfm.removeWhenNotInInventoryItem != null && sfm.removeWhenNotInInventoryItem.getStringID().equalsIgnoreCase(staff.getStringID())) {
-                    return true;
-                }
-            }
-
-            if (summonedMob instanceof FollowingWormMobHead) {
-                FollowingWormMobHead<?, ?> fwh = (FollowingWormMobHead<?, ?>) summonedMob;
-                if (fwh.removeWhenNotInInventoryItem != null && fwh.removeWhenNotInInventoryItem.getStringID().equalsIgnoreCase(staff.getStringID())) {
-                    return true;
-                }
-            }
-            
-            return false;
-        } catch (Exception e) {
-            return false;
+        SummonWeaponAdapter adapter = SummonCompatRegistry.getAdapter(hotbarItem);
+        if (adapter != null) {
+            return adapter.isMatchingMinion(summonedMob, hotbarItem);
         }
+        return false;
     }
 
     /**
-     * Get the maximum summon count for a specific staff using direct engine API in Necesse 1.3.2
+     * Get the maximum summon count for a specific weapon adapter
      */
-    public static int getStaffMaxSummons(SummonToolItem staff, PlayerMob player, InventoryItem hotbarItem, int playerMaxSummons) {
-        int weaponLimit = AutoSummonConfig.getSettings().getWeaponSummonLimit(staff.getStringID());
+    public static int getStaffMaxSummons(SummonWeaponAdapter adapter, PlayerMob player, InventoryItem hotbarItem, int playerMaxSummons) {
+        if (adapter == null) return playerMaxSummons;
+
+        int weaponLimit = AutoSummonConfig.getSettings().getWeaponSummonLimit(adapter.getItemStringID());
         if (weaponLimit > 0) {
             return weaponLimit;
         }
@@ -228,30 +243,26 @@ public class AutoSummonPatch {
         if (AutoSummonConfig.getSettings().hasGlobalCustomLimit()) {
             return AutoSummonConfig.getSettings().getGlobalCustomSummonLimit();
         }
-        
-        if (!staff.drawMaxSummons) {
-            try {
-                return staff.getMaxSummons(hotbarItem, player);
-            } catch (Throwable t) {
-                try {
-                    java.lang.reflect.Method m = staff.getClass().getMethod("getMaxSummons", InventoryItem.class, necesse.entity.mobs.itemAttacker.ItemAttackerMob.class);
-                    Object res = m.invoke(staff, hotbarItem, player);
-                    if (res instanceof Integer) {
-                        return (Integer) res;
-                    }
-                } catch (Exception ignored) {}
-            }
-        }
-        
-        return playerMaxSummons;
+
+        return adapter.getMaxAllowed(hotbarItem, player, playerMaxSummons);
     }
 
     /**
-     * Check if a specific summon staff can summon another minion
+     * Legacy overload for SummonToolItem
      */
-    public static boolean canSummon(PlayerMob player, SummonToolItem staff, InventoryItem hotbarItem, int playerMaxSummons) {
-        int activeForStaff = getCurrentSummonCountFollowers(player, staff, hotbarItem);
-        int weaponLimit = AutoSummonConfig.getSettings().getWeaponSummonLimit(staff.getStringID());
+    public static int getStaffMaxSummons(SummonToolItem staff, PlayerMob player, InventoryItem hotbarItem, int playerMaxSummons) {
+        SummonWeaponAdapter adapter = SummonCompatRegistry.getAdapter(hotbarItem);
+        return getStaffMaxSummons(adapter, player, hotbarItem, playerMaxSummons);
+    }
+
+    /**
+     * Check if a specific summon weapon adapter can summon another minion
+     */
+    public static boolean canSummon(PlayerMob player, SummonWeaponAdapter adapter, InventoryItem hotbarItem, int playerMaxSummons) {
+        if (player == null || adapter == null) return false;
+
+        int activeForStaff = getCurrentSummonCountFollowers(player, adapter, hotbarItem);
+        int weaponLimit = AutoSummonConfig.getSettings().getWeaponSummonLimit(adapter.getItemStringID());
 
         if (weaponLimit > 0 && activeForStaff >= weaponLimit) {
             return false;
@@ -261,34 +272,41 @@ public class AutoSummonPatch {
             return false;
         }
 
-        int summonCost = Math.max(1, Math.round(staff.getSummonSpaceTaken(hotbarItem, player)));
+        int summonCost = Math.max(1, Math.round(adapter.getSummonSpaceCost(hotbarItem, player)));
 
-        if (staff.drawMaxSummons) {
+        if (adapter.isGlobalSlotWeapon(hotbarItem, player)) {
             int currentGlobalSlots = getTotalGlobalSummonSlotsUsed(player);
             return currentGlobalSlots + summonCost <= playerMaxSummons;
         }
 
-        int staffMax = staff.getMaxSummons(hotbarItem, player);
+        int staffMax = adapter.getMaxAllowed(hotbarItem, player, playerMaxSummons);
         return activeForStaff + summonCost <= staffMax;
+    }
+
+    /**
+     * Legacy overload for SummonToolItem
+     */
+    public static boolean canSummon(PlayerMob player, SummonToolItem staff, InventoryItem hotbarItem, int playerMaxSummons) {
+        SummonWeaponAdapter adapter = SummonCompatRegistry.getAdapter(hotbarItem);
+        return canSummon(player, adapter, hotbarItem, playerMaxSummons);
     }
 
     /**
      * Check if the player is at max summons across all hotbar staffs
      */
     public static boolean isAtMaxSummons(PlayerMob player) {
-        int playerMaxSummons = player.buffManager.getModifier(BuffModifiers.MAX_SUMMONS);
-        
+        int playerMaxSummons = player.buffManager != null ? player.buffManager.getModifier(BuffModifiers.MAX_SUMMONS) : 1;
+
         for (int i = 9; i >= 0; i--) {
             InventoryItem hotbarItem = player.getInv().main.getItem(i);
-            
-            if (hotbarItem != null && hotbarItem.item instanceof SummonToolItem) {
-                SummonToolItem staff = (SummonToolItem) hotbarItem.item;
-                if (canSummon(player, staff, hotbarItem, playerMaxSummons)) {
+            if (hotbarItem != null) {
+                SummonWeaponAdapter adapter = SummonCompatRegistry.getAdapter(hotbarItem);
+                if (adapter != null && canSummon(player, adapter, hotbarItem, playerMaxSummons)) {
                     return false;
                 }
             }
         }
-        
+
         return true;
     }
 
@@ -357,7 +375,7 @@ public class AutoSummonPatch {
             return;
         }
 
-        // Fast-path 5: Quick scan hotbar slots 0-9 for any summon weapons
+        // Fast-path 5: Quick scan hotbar slots 0-9 for any summon weapons via compatibility registry
         boolean hasAnySummonStaff = false;
         AutoSummonModSettings settings = AutoSummonConfig.getSettings();
         int playerMaxSummons = player.buffManager != null ? player.buffManager.getModifier(BuffModifiers.MAX_SUMMONS) : 1;
@@ -374,20 +392,20 @@ public class AutoSummonPatch {
         for (int i = 0; i < 10; i++) {
             hotbarSlots[i].reset();
             InventoryItem item = player.getInv().main.getItem(i);
-            if (item != null && item.item instanceof SummonToolItem) {
-                SummonToolItem staff = (SummonToolItem) item.item;
-                HotbarSlotInfo info = hotbarSlots[i];
-                info.slotIndex = i;
-                info.item = item;
-                info.staff = staff;
-                info.isSlotWeapon = staff.drawMaxSummons;
-                info.summonCost = Math.max(1, Math.round(staff.getSummonSpaceTaken(item, player)));
-                info.customLimit = settings.getWeaponSummonLimit(staff.getStringID());
-                info.maxAllowed = info.isSlotWeapon 
-                    ? Math.max(1, (int) Math.floor((float) playerMaxSummons / info.summonCost))
-                    : Math.max(1, staff.getMaxSummons(item, player));
-                info.present = true;
-                hasAnySummonStaff = true;
+            if (item != null) {
+                SummonWeaponAdapter adapter = SummonCompatRegistry.getAdapter(item);
+                if (adapter != null) {
+                    HotbarSlotInfo info = hotbarSlots[i];
+                    info.slotIndex = i;
+                    info.item = item;
+                    info.adapter = adapter;
+                    info.isSlotWeapon = adapter.isGlobalSlotWeapon(item, player);
+                    info.summonCost = Math.max(1, Math.round(adapter.getSummonSpaceCost(item, player)));
+                    info.customLimit = settings.getWeaponSummonLimit(adapter.getItemStringID());
+                    info.maxAllowed = adapter.getMaxAllowed(item, player, playerMaxSummons);
+                    info.present = true;
+                    hasAnySummonStaff = true;
+                }
             }
         }
 
@@ -405,7 +423,7 @@ public class AutoSummonPatch {
                 if (mob == null || mob.removed() || mob.getHealth() <= 0 || mob.getFollowingUniqueID() != playerID) {
                     continue;
                 }
-                if (mob instanceof WormMobBody) {
+                if (SummonCompatRegistry.isWormBody(mob)) {
                     continue;
                 }
 
@@ -414,7 +432,7 @@ public class AutoSummonPatch {
                     HotbarSlotInfo info = hotbarSlots[s];
                     if (!info.present) continue;
 
-                    if (isSummonedByStaff(mob, info.staff, info.item)) {
+                    if (info.adapter.isMatchingMinion(mob, info.item)) {
                         info.activeCount++;
                         if (info.isSlotWeapon) {
                             globalSlotsUsed += info.summonCost;
@@ -426,9 +444,9 @@ public class AutoSummonPatch {
 
                 // If minion was spawned by an off-hotbar inventory staff
                 if (!matched) {
-                    SummonToolItem invStaff = findStaffForMob(player, mob);
-                    if (invStaff != null && invStaff.drawMaxSummons) {
-                        globalSlotsUsed += Math.max(1, Math.round(invStaff.getSummonSpaceTaken(null, player)));
+                    SummonWeaponAdapter invAdapter = SummonCompatRegistry.findWeaponForMob(player, mob);
+                    if (invAdapter != null && invAdapter.isGlobalSlotWeapon(null, player)) {
+                        globalSlotsUsed += Math.max(1, Math.round(invAdapter.getSummonSpaceCost(null, player)));
                     }
                 }
             }
@@ -442,13 +460,37 @@ public class AutoSummonPatch {
             HotbarSlotInfo info = hotbarSlots[i];
             if (!info.present) continue;
 
-            boolean canSummonThis = false;
+            // 1. If active minion count exceeds custom limit (e.g. player reduced limit in GUI), despawn excess
+            if (info.customLimit > 0 && info.activeCount > info.customLimit) {
+                int toRemove = info.activeCount - info.customLimit;
+                if (player.getLevel() != null && player.getLevel().entityManager != null && player.getLevel().entityManager.mobs != null) {
+                    int playerID = player.getUniqueID();
+                    List<Mob> excessList = new ArrayList<>();
+                    for (Mob mob : player.getLevel().entityManager.mobs) {
+                        if (mob == null || mob.removed() || mob.getFollowingUniqueID() != playerID) continue;
+                        if (SummonCompatRegistry.isWormBody(mob)) continue;
+                        if (info.adapter.isMatchingMinion(mob, info.item)) {
+                            excessList.add(mob);
+                            info.activeCount--;
+                            if (info.isSlotWeapon) {
+                                globalSlotsUsed -= info.summonCost;
+                            }
+                            toRemove--;
+                            if (toRemove <= 0) break;
+                        }
+                    }
+                    for (Mob mob : excessList) {
+                        mob.remove();
+                    }
+                }
+            }
 
-            // Check custom limit
+            // 2. Check custom limit
             if (info.customLimit > 0 && info.activeCount >= info.customLimit) {
                 continue;
             }
 
+            boolean canSummonThis = false;
             if (info.isSlotWeapon) {
                 if (globalSlotsUsed + info.summonCost <= playerMaxSummons) {
                     canSummonThis = true;
@@ -461,14 +503,23 @@ public class AutoSummonPatch {
 
             if (canSummonThis) {
                 allFull = false;
-                String canAttackResult = info.staff.canAttack(player.getLevel(), (int) player.getX(),
-                        (int) player.getY(), player, info.item);
+                String canAttackResult = info.adapter.canAttack(player, info.item);
 
                 if (canAttackResult == null) {
+                    // Compute directional offset 64px in front of player for reliable projectile summon raycasts
+                    int targetX = (int) player.getX();
+                    int targetY = (int) player.getY();
+                    int dir = player.getDir();
+                    if (dir == 0) targetY -= 64;      // Up
+                    else if (dir == 1) targetX += 64; // Right
+                    else if (dir == 2) targetY += 64; // Down
+                    else if (dir == 3) targetX -= 64; // Left
+
                     PlayerInventorySlot slot = new PlayerInventorySlot(player.getInv().main, i);
-                    player.tryAttack(slot, (int) player.getX(), (int) player.getY());
+                    player.tryAttack(slot, targetX, targetY);
                     localNextCheckTime = currentTime + AutoSummonConfig.getSummonCheckCooldown();
                     summonedAny = true;
+                    autosummon.gui.AutoSummonGuiManager.notifySummonChanged();
                     break;
                 }
             }

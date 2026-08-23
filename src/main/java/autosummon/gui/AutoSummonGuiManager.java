@@ -86,4 +86,13 @@ public class AutoSummonGuiManager {
         return activeForm != null && mainGame != null && mainGame.formManager != null 
             && mainGame.formManager.hasComponent(activeForm) && !activeForm.isHidden();
     }
+
+    /**
+     * Notify the active GUI that a summon event occurred so it can update counters immediately
+     */
+    public static void notifySummonChanged() {
+        if (activeForm != null && !activeForm.isHidden()) {
+            activeForm.markSnapshotDirty();
+        }
+    }
 }

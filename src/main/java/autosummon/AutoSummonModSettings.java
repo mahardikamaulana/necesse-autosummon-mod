@@ -129,11 +129,10 @@ public class AutoSummonModSettings extends ModSettings {
         }
         for (int i = 0; i < player.getInv().main.getSize(); i++) {
             necesse.inventory.InventoryItem item = player.getInv().main.getItem(i);
-            if (item != null && item.item instanceof necesse.inventory.item.toolItem.summonToolItem.SummonToolItem) {
-                necesse.inventory.item.toolItem.summonToolItem.SummonToolItem staff = 
-                    (necesse.inventory.item.toolItem.summonToolItem.SummonToolItem) item.item;
-                if (staff.drawMaxSummons) {
-                    weaponSummonLimits.remove(staff.getStringID());
+            if (item != null) {
+                autosummon.compat.SummonWeaponAdapter adapter = autosummon.compat.SummonCompatRegistry.getAdapter(item);
+                if (adapter != null && adapter.isGlobalSlotWeapon(item, player)) {
+                    weaponSummonLimits.remove(adapter.getItemStringID());
                 }
             }
         }

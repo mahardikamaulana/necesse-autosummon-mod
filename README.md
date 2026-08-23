@@ -6,15 +6,15 @@ Tired of manually spam-recasting all your minions every time you die, travel bet
 
 ## Features
 
-- **Auto Summoning**: Automatically casts summon weapons placed in hotbar slots 1–10 whenever minion slots are available.
-- **Hotbar Priority**: Scans hotbar from right to left (Slot 10 down to Slot 1), prioritizing weapons placed further to the right.
-- **In-Game Configuration (`F9`)**:
-  - Master toggle to enable/disable auto summoning.
-  - Live global slot monitor and per-weapon active minion counts.
-  - Per-weapon limit controls: set fixed limits or leave on `Auto` to use available slots.
-- **Slot & Follower Support**: Correctly separates slot-consuming summons (e.g. Crystallized Skull) and follower summons (e.g. Frost Piercer).
-- **Capacity Fallback**: Automatically resets slot-consuming staves to `Auto` if player summon slots decrease (e.g. unequipping gear or buff expiration).
-- **Performance Optimized**: Single-pass level scanning and tick backoff when capacity is full.
+- **Hands-Free Summoning**: Keep your summon staves in hotbar slots 1–10, and the mod automatically summons and maintains your minion army whenever you're short on minions.
+- **Smart Hotbar Priority**: Rightmost weapons get cast first (Slot 10 down to Slot 1). Want your favorite summons out first? Just place them on the right side of your bar!
+- **Simple In-Game Menu (`F9`)**:
+  - One-click toggle to turn auto-summoning on or off anytime.
+  - Live overview showing your active summon slots, free slots, follower buddies, and sentries in real time.
+  - Customize minion limits per weapon with quick `[-]` and `[+]` buttons, or leave them on `Auto` to fill whatever slots you have available.
+- **Summoner's Expansion Ready**: Works right out of the box with the **Summoner's Expansion** mod! It understands multi-type summons (like baby zombie archers, spiders, and skeletons) and keeps follower summons (like books of bees or magma slimes) from eating your main summon slots.
+- **Zero Lag & Smooth Gameplay**: Runs effortlessly in the background with zero frame drops or micro-stutter, even in giant army boss fights.
+- **Multiplayer Friendly**: 100% client-side. Hop onto any server and enjoy auto-summoning without needing the server or host to install anything!
 
 ## Controls
 
@@ -42,4 +42,4 @@ The compiled jar will be in `build/jar/`.
 ## Credits
 
 - [brydonm](https://github.com/brydonm) - Original mod author ([necesse-autosummon-mod](https://github.com/brydonm/necesse-autosummon-mod)).
-- [Xeraphire](https://github.com/mahardikamaulana) - In-game GUI, per-weapon limit controls, slot tracking, and optimizations.
+- [Xeraphire](https://github.com/mahardikamaulana) - In-game GUI, Summoner's Expansion compatibility, dynamic slot tracking, and optimizations.

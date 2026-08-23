@@ -15,6 +15,9 @@ public class AutoSummonMod {
         
         // Initialize the control
         AutoSummonConfig.initControl();
+
+        // Initialize modular compatibility providers
+        autosummon.compat.SummonCompatRegistry.init();
     }
 
     public void initResources() {
@@ -22,7 +25,7 @@ public class AutoSummonMod {
     }
 
     public void postInit() {
-        // No additional initialization needed
+        autosummon.compat.SummonCompatRegistry.init();
         System.out.println("Auto Summon Mod initialization complete!");
     }
     
