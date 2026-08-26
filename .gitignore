@@ -9,9 +9,16 @@ gen
 *.ipr
 *.iws
 
-# Build files
-build
-.gradle
+# Build & Test files
+build/
+.gradle/
+bin/
+
+# OS & Workspace files
+.DS_Store
+*.code-workspace
+local.properties
+gradle.properties.local
 
 # Patch files
 *.patch

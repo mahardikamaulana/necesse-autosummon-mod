@@ -1,6 +1,7 @@
 package autosummon;
 
 import autosummon.gui.AutoSummonGuiManager;
+import autosummon.util.AutoSummonLog;
 import necesse.engine.input.Control;
 import necesse.engine.input.InputEvent;
 import necesse.engine.localization.message.StaticMessage;
@@ -16,10 +17,16 @@ public class AutoSummonSettingsControl extends Control {
     
     @Override
     public void activate(InputEvent event) {
-        if (event.state) {
-            AutoSummonGuiManager.toggleGui();
+        try {
+            if (event != null && event.state) {
+                AutoSummonGuiManager.toggleGui();
+            }
+        } catch (Throwable t) {
+            AutoSummonLog.error("Error activating AutoSummonSettingsControl", t);
         }
-        super.activate(event);
+        try {
+            super.activate(event);
+        } catch (Throwable ignored) {}
     }
 }
 

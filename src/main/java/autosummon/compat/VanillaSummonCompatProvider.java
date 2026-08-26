@@ -1,8 +1,8 @@
 package autosummon.compat;
 
+import autosummon.util.AutoSummonLog;
 import necesse.entity.mobs.Mob;
 import necesse.entity.mobs.PlayerMob;
-import necesse.entity.mobs.WormMobBody;
 import necesse.entity.mobs.summon.FollowingWormMobHead;
 import necesse.entity.mobs.summon.summonFollowingMob.SummonedFollowingMob;
 import necesse.inventory.InventoryItem;
@@ -12,7 +12,7 @@ import java.util.*;
 
 /**
  * Standard compatibility provider for vanilla Necesse summon weapons.
- * Includes multi-variant mob matching for weapons like Brain on a Stick.
+ * Includes multi-variant mob matching for weapons like Brain on a Stick with zero-allocation optimizations.
  */
 public class VanillaSummonCompatProvider implements SummonCompatProvider {
 
@@ -55,11 +55,26 @@ public class VanillaSummonCompatProvider implements SummonCompatProvider {
     public static class VanillaSummonAdapter implements SummonWeaponAdapter {
         protected final SummonToolItem staff;
         protected final String stringID;
+        protected final String staffMobLower;
         protected final Set<String> multiMobs;
 
         public VanillaSummonAdapter(SummonToolItem staff) {
             this.staff = staff;
-            this.stringID = staff != null ? staff.getStringID().toLowerCase() : "";
+            String id = "";
+            try {
+                if (staff != null && staff.getStringID() != null) {
+                    id = staff.getStringID().toLowerCase();
+                }
+            } catch (Throwable ignored) {}
+            this.stringID = id;
+
+            String mob = "";
+            try {
+                if (staff != null && staff.mobStringID != null) {
+                    mob = staff.mobStringID.toLowerCase();
+                }
+            } catch (Throwable ignored) {}
+            this.staffMobLower = mob;
             this.multiMobs = VANILLA_MULTI_MOBS.getOrDefault(this.stringID, Collections.emptySet());
         }
 
@@ -69,80 +84,105 @@ public class VanillaSummonCompatProvider implements SummonCompatProvider {
 
         @Override
         public String getItemStringID() {
-            return staff.getStringID();
+            try {
+                if (staff != null && staff.getStringID() != null) {
+                    return staff.getStringID();
+                }
+            } catch (Throwable ignored) {}
+            return stringID;
         }
 
         @Override
         public String getDisplayName(InventoryItem item) {
-            return item != null ? item.getItemDisplayName() : staff.getStringID();
+            try {
+                if (item != null) {
+                    return item.getItemDisplayName();
+                }
+            } catch (Throwable ignored) {}
+            return staff != null ? staff.getStringID() : "Unknown Staff";
         }
 
         @Override
         public boolean isGlobalSlotWeapon(InventoryItem item, PlayerMob player) {
             if (staff == null) return false;
-            // Only weapons that draw max summons AND use standard "summonedmob" group consume global slots
-            boolean isStandardSummonMob = staff.summonType == null || staff.summonType.equalsIgnoreCase("summonedmob");
-            return staff.drawMaxSummons && isStandardSummonMob;
+            try {
+                // Only weapons that draw max summons AND use standard "summonedmob" group consume global slots
+                boolean isStandardSummonMob = staff.summonType == null || staff.summonType.equalsIgnoreCase("summonedmob");
+                return staff.drawMaxSummons && isStandardSummonMob;
+            } catch (Throwable t) {
+                AutoSummonLog.logThrottledError("vanilla_isGlobalSlotWeapon", "Error evaluating isGlobalSlotWeapon for " + stringID, t, 5000);
+                return true;
+            }
         }
 
         @Override
         public float getSummonSpaceCost(InventoryItem item, PlayerMob player) {
+            if (staff == null) return 1.0f;
             try {
-                return staff.getSummonSpaceTaken(item, player);
-            } catch (Exception e) {
+                float cost = staff.getSummonSpaceTaken(item, player);
+                if (Float.isNaN(cost) || Float.isInfinite(cost) || cost <= 0) {
+                    return 1.0f;
+                }
+                return cost;
+            } catch (Throwable t) {
+                AutoSummonLog.logThrottledError("vanilla_spaceCost_" + stringID, "Error getting space cost for " + stringID, t, 5000);
                 return 1.0f;
             }
         }
 
         @Override
         public int getMaxAllowed(InventoryItem item, PlayerMob player, int playerMaxSummons) {
-            if (isGlobalSlotWeapon(item, player)) {
-                float cost = getSummonSpaceCost(item, player);
-                if (cost <= 0) cost = 1.0f;
-                return Math.max(1, (int) Math.floor(playerMaxSummons / cost));
-            } else {
-                try {
+            if (staff == null) return 1;
+            try {
+                if (isGlobalSlotWeapon(item, player)) {
+                    if (playerMaxSummons <= 0) return 0;
+                    float cost = getSummonSpaceCost(item, player);
+                    if (cost <= 0) cost = 1.0f;
+                    return Math.max(1, (int) Math.floor(playerMaxSummons / cost));
+                } else {
                     return Math.max(1, staff.getMaxSummons(item, player));
-                } catch (Throwable t) {
-                    return 1;
                 }
+            } catch (Throwable t) {
+                AutoSummonLog.logThrottledError("vanilla_maxAllowed_" + stringID, "Error calculating max allowed for " + stringID, t, 5000);
+                return 1;
             }
         }
 
         @Override
         public boolean isMatchingMinion(Mob mob, InventoryItem item) {
             if (mob == null || staff == null) return false;
-            if (mob instanceof WormMobBody) return false;
+            if (MobClassifier.isIgnoredFollower(mob)) return false;
 
             try {
                 String mobStringID = mob.getStringID();
                 if (mobStringID == null) return false;
+
+                // 1. Direct string comparison
+                String staffMobID = staff.mobStringID;
+                if (staffMobID != null) {
+                    if (mobStringID.equals(staffMobID) || mobStringID.equalsIgnoreCase(staffMobID)) {
+                        return true;
+                    }
+                }
+
                 String mobLower = mobStringID.toLowerCase();
 
-                // 1. Check multi-mob variant dictionary (e.g. brainonastick -> babyzombie, babyzombiearcher)
+                // 2. Multi-mob variant dictionary (e.g. brainonastick -> babyzombie, babyzombiearcher)
                 if (!multiMobs.isEmpty() && multiMobs.contains(mobLower)) {
                     return true;
                 }
 
-                // 2. Direct string ID match
-                String staffMobStringID = staff.mobStringID;
-                if (staffMobStringID != null) {
-                    String staffLower = staffMobStringID.toLowerCase();
-                    if (mobLower.equals(staffLower)) {
-                        return true;
-                    }
-                    // Prefix matching for variants (e.g. babyzombiearcher starts with babyzombie)
-                    if (mobLower.startsWith(staffLower) && !staffLower.isEmpty()) {
-                        return true;
-                    }
+                // 3. Prefix matching for variants (e.g. babyzombiearcher starts with babyzombie)
+                if (!staffMobLower.isEmpty() && mobLower.startsWith(staffMobLower)) {
+                    return true;
                 }
 
-                // 3. Summon type match
+                // 4. Summon type match
                 if (staff.summonType != null && staff.summonType.equalsIgnoreCase(mobStringID)) {
                     return true;
                 }
 
-                // 4. Inventory item back-reference checks
+                // 5. Inventory item back-reference checks
                 if (mob instanceof SummonedFollowingMob) {
                     SummonedFollowingMob sfm = (SummonedFollowingMob) mob;
                     if (sfm.removeWhenNotInInventoryItem != null && sfm.removeWhenNotInInventoryItem.getStringID().equalsIgnoreCase(staff.getStringID())) {
@@ -156,17 +196,24 @@ public class VanillaSummonCompatProvider implements SummonCompatProvider {
                         return true;
                     }
                 }
-            } catch (Exception ignored) {}
+            } catch (Throwable t) {
+                AutoSummonLog.logThrottledError("vanilla_isMatchingMinion", "Error matching minion for " + stringID, t, 5000);
+            }
 
             return false;
         }
 
         @Override
         public String canAttack(PlayerMob player, InventoryItem item) {
-            if (player == null || player.getLevel() == null || item == null) {
+            if (player == null || player.getLevel() == null || item == null || staff == null) {
                 return "Invalid state";
             }
-            return staff.canAttack(player.getLevel(), (int) player.getX(), (int) player.getY(), player, item);
+            try {
+                return staff.canAttack(player.getLevel(), (int) player.getX(), (int) player.getY(), player, item);
+            } catch (Throwable t) {
+                AutoSummonLog.logThrottledError("vanilla_canAttack_" + stringID, "Error checking canAttack for " + stringID, t, 5000);
+                return "Attack check failed";
+            }
         }
 
         @Override
@@ -186,12 +233,16 @@ public class VanillaSummonCompatProvider implements SummonCompatProvider {
 
         @Override
         public String getWeaponTypeDisplay(InventoryItem item, PlayerMob player, int maxAllowed) {
-            if (isGlobalSlotWeapon(item, player)) {
-                float spaceCost = getSummonSpaceCost(item, player);
-                String costDisplay = (spaceCost == (int) spaceCost) ? String.valueOf((int) spaceCost) : String.format("%.1f", spaceCost);
-                return costDisplay + " slot(s)/summon (Max: " + maxAllowed + ")";
-            } else {
-                return "Follower (Cap: " + maxAllowed + ")";
+            try {
+                if (isGlobalSlotWeapon(item, player)) {
+                    float spaceCost = getSummonSpaceCost(item, player);
+                    String costDisplay = (spaceCost == (int) spaceCost) ? String.valueOf((int) spaceCost) : String.format("%.1f", spaceCost);
+                    return costDisplay + " slot(s)/summon (Max: " + maxAllowed + ")";
+                } else {
+                    return "Follower (Cap: " + maxAllowed + ")";
+                }
+            } catch (Throwable t) {
+                return "Summon (Cap: " + maxAllowed + ")";
             }
         }
     }

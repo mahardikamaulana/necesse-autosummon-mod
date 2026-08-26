@@ -9,8 +9,8 @@ plugins {
 
 project.ext.modID = "xeraphire.autosummon" // The unique id of your mod. Must be all lowercase and cannot use special characters.
 project.ext.modName = "Auto Summon" // The display name of your mod.
-project.ext.modVersion = "2.1.0" // Your current builds version. Must follow the xx.xx... format.
-project.ext.gameVersion = "1.3.2" // The target game version.
+project.ext.modVersion = "2.3.0" // Your current builds version. Must follow the xx.xx... format.
+project.ext.gameVersion = "1.3.3" // The target game version.
 project.ext.modDescription = "Automatically summons using the rightmost staff in your hotbar" // Short description of what your mod is.
 project.ext.author = "Xeraphire" // Your name
 
@@ -29,10 +29,55 @@ project.ext.clientside = true
 //project.ext.modDependencies = ["other.modid1", "other.modid2"]
 project.ext.modOptionalDependencies = ["gagadoliano.summonerexpansion"]
 
-// The path to the games install directory
-def gameDirectory = System.getProperty("os.name").toLowerCase().contains("mac") ?
-    System.getProperty("user.home") + "/Library/Application Support/Steam/steamapps/common/Necesse/Necesse.app/Contents/Resources" :
-    "C:/SteamLibrary/steamapps/common/Necesse"
+// Resolve gameDirectory dynamically from env vars, Gradle properties, or OS standard paths
+def resolveGameDirectory() {
+    // 1. Check system environment variable
+    def envDir = System.getenv("NECESSE_GAME_DIR") ?: System.getenv("NECESSE_HOME")
+    if (envDir && file("${envDir}/Necesse.jar").exists()) {
+        return envDir
+    }
+
+    // 2. Check Gradle project property (-PnecesseGameDir=... or in gradle.properties)
+    if (project.hasProperty("necesseGameDir")) {
+        def propDir = project.property("necesseGameDir").toString()
+        if (file("${propDir}/Necesse.jar").exists()) {
+            return propDir
+        }
+    }
+
+    // 3. Check OS standard candidate locations
+    def osName = System.getProperty("os.name").toLowerCase()
+    def userHome = System.getProperty("user.home")
+    def candidates = []
+
+    if (osName.contains("mac")) {
+        candidates << "${userHome}/Library/Application Support/Steam/steamapps/common/Necesse/Necesse.app/Contents/Resources"
+        candidates << "${userHome}/Library/Application Support/Steam/steamapps/common/Necesse"
+    } else if (osName.contains("win")) {
+        candidates << "C:/Program Files (x86)/Steam/steamapps/common/Necesse"
+        candidates << "C:/Program Files/Steam/steamapps/common/Necesse"
+        candidates << "C:/SteamLibrary/steamapps/common/Necesse"
+        candidates << "D:/SteamLibrary/steamapps/common/Necesse"
+        candidates << "E:/SteamLibrary/steamapps/common/Necesse"
+    } else {
+        // Linux
+        candidates << "${userHome}/.steam/steam/steamapps/common/Necesse"
+        candidates << "${userHome}/.local/share/Steam/steamapps/common/Necesse"
+    }
+
+    for (candidate in candidates) {
+        if (file("${candidate}/Necesse.jar").exists()) {
+            return candidate
+        }
+    }
+
+    // Fallback to default for OS
+    return osName.contains("mac") ?
+        "${userHome}/Library/Application Support/Steam/steamapps/common/Necesse/Necesse.app/Contents/Resources" :
+        "C:/SteamLibrary/steamapps/common/Necesse"
+}
+
+def gameDirectory = resolveGameDirectory()
 
 // =================================================
 // ========== DO NOT EDIT BELOW THIS LINE ==========
@@ -63,7 +108,13 @@ def buildLocation = "build/jar/"
 compileJava.options.encoding = "UTF-8"
 
 if (!file(gameDirectory + "/Necesse.jar").exists()) {
-    throw new Exception("Could not find game install directory. Make sure it is correct in build.gradle file.")
+    throw new GradleException(
+        "Could not find Necesse game install directory at '${gameDirectory}'.\n" +
+        "Please specify your Necesse installation path using any of the following methods:\n" +
+        "  1. Set environment variable: NECESSE_GAME_DIR=/path/to/Necesse\n" +
+        "  2. Add to gradle.properties: necesseGameDir=/path/to/Necesse\n" +
+        "  3. Pass via command line: ./gradlew -PnecesseGameDir=/path/to/Necesse <task>"
+    )
 }
 
 dependencies {
@@ -71,10 +122,12 @@ dependencies {
     implementation fileTree(gameDirectory + "/lib/")
     implementation fileTree("./mods/") // Add all mods located in local mods folder
 
-    // Add any third party library dependencies here. Remember to use libDepends, so that they will be added to your jar on build
-    // These are some examples:
-//    libDepends group: 'com.google.guava', name: 'guava', version: '31.1-jre'
-//    libDepends files("path/to/library/jar.jar")
+    testImplementation 'org.junit.jupiter:junit-jupiter-api:5.10.2'
+    testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.10.2'
+}
+
+test {
+    useJUnitPlatform()
 }
 
 task createAppID {
@@ -93,16 +146,24 @@ task createModInfoFile(type: JavaExec) {
     classpath = files(gameDirectory + "/Necesse.jar")
 
     main = "CreateModInfoFile"
-    args "-file", "${sourceSets.main.java.outputDir}/mod.info",
-            "-id", "${project.ext.modID}",
-            "-name", "${project.ext.modName}",
-            "-version", "${project.ext.modVersion}",
-            "-gameVersion", "${project.ext.gameVersion}",
-            "-description", "${project.ext.modDescription}",
-            "-author", "${project.ext.author}",
-            "-clientside", "${project.ext.clientside}",
-            "-dependencies", project.ext.has("modDependencies") ? "[" + project.ext.modDependencies.join(", ") + "]" : "",
-            "-optionalDependencies", project.ext.has("modOptionalDependencies") ? "[" + project.ext.modOptionalDependencies.join(", ") + "]" : ""
+
+    def infoArgs = [
+        "-file", "${sourceSets.main.java.outputDir}/mod.info",
+        "-id", "${project.ext.modID}",
+        "-name", "${project.ext.modName}",
+        "-version", "${project.ext.modVersion}",
+        "-gameVersion", "${project.ext.gameVersion}",
+        "-description", "${project.ext.modDescription}",
+        "-author", "${project.ext.author}",
+        "-clientside", "${project.ext.clientside}"
+    ]
+    if (project.ext.has("modDependencies") && project.ext.modDependencies) {
+        infoArgs.addAll(["-dependencies", "[" + project.ext.modDependencies.join(", ") + "]"])
+    }
+    if (project.ext.has("modOptionalDependencies") && project.ext.modOptionalDependencies) {
+        infoArgs.addAll(["-optionalDependencies", "[" + project.ext.modOptionalDependencies.join(", ") + "]"])
+    }
+    args infoArgs
 }
 // Makes compiling also create mod info file
 classes.dependsOn("createModInfoFile")

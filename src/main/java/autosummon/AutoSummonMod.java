@@ -1,5 +1,6 @@
 package autosummon;
 
+import autosummon.util.AutoSummonLog;
 import necesse.engine.modLoader.annotations.ModEntry;
 import necesse.engine.modLoader.ModSettings;
 
@@ -7,17 +8,21 @@ import necesse.engine.modLoader.ModSettings;
 public class AutoSummonMod {
 
     public void init() {
-        System.out.println("Auto Summon Mod loaded!");
-        System.out.println("Automatically summons using the rightmost staff in your hotbar.");
-        
-        // Initialize settings first
-        AutoSummonConfig.initSettings();
-        
-        // Initialize the control
-        AutoSummonConfig.initControl();
+        try {
+            AutoSummonLog.info("Auto Summon Mod loaded!");
+            AutoSummonLog.info("Automatically summons using the rightmost staff in your hotbar.");
+            
+            // Initialize settings first
+            AutoSummonConfig.initSettings();
+            
+            // Initialize the control
+            AutoSummonConfig.initControl();
 
-        // Initialize modular compatibility providers
-        autosummon.compat.SummonCompatRegistry.init();
+            // Initialize modular compatibility providers
+            autosummon.compat.SummonCompatRegistry.init();
+        } catch (Throwable t) {
+            AutoSummonLog.error("Error during AutoSummonMod.init()", t);
+        }
     }
 
     public void initResources() {
@@ -25,8 +30,12 @@ public class AutoSummonMod {
     }
 
     public void postInit() {
-        autosummon.compat.SummonCompatRegistry.init();
-        System.out.println("Auto Summon Mod initialization complete!");
+        try {
+            autosummon.compat.SummonCompatRegistry.init();
+            AutoSummonLog.info("Auto Summon Mod initialization complete!");
+        } catch (Throwable t) {
+            AutoSummonLog.error("Error during AutoSummonMod.postInit()", t);
+        }
     }
     
     /**
@@ -34,6 +43,16 @@ public class AutoSummonMod {
      * This method is called by the game to persist mod settings
      */
     public ModSettings getModSettings() {
-        return AutoSummonConfig.getSettings();
+        try {
+            ModSettings settings = AutoSummonConfig.getSettings();
+            if (settings == null) {
+                AutoSummonConfig.initSettings();
+                settings = AutoSummonConfig.getSettings();
+            }
+            return settings;
+        } catch (Throwable t) {
+            AutoSummonLog.error("Error retrieving mod settings", t);
+            return null;
+        }
     }
 }

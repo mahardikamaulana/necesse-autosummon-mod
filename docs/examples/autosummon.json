@@ -1,0 +1,41 @@
+{
+  "modId": "author.mymod",
+  "weapons": [
+    {
+      "id": "my_skeleton_staff",
+      "displayName": "Skeleton Staff",
+      "minion": "myskeletonminion",
+      "category": "GLOBAL_SLOT",
+      "slotCost": 1.0
+    },
+    {
+      "id": "my_spider_staff",
+      "displayName": "Brood Spider Staff",
+      "minions": [
+        "spidermeleeminion",
+        "spiderrangeminion"
+      ],
+      "category": "GLOBAL_SLOT",
+      "slotCost": 1.0
+    },
+    {
+      "id": "book_of_bees",
+      "displayName": "Book of Bees",
+      "minion": "beeminion",
+      "category": "INDEPENDENT_FOLLOWER",
+      "maxAllowed": 2
+    },
+    {
+      "id": "crystal_turret_scepter",
+      "displayName": "Crystal Turret Scepter",
+      "minion": "crystalturretmob",
+      "category": "SENTRY_SUPPORT",
+      "maxAllowed": 1
+    }
+  ],
+  "ignoredMobs": [
+    "my_cosmetic_pet",
+    "my_flying_ghost_lantern",
+    "my_custom_mount"
+  ]
+}

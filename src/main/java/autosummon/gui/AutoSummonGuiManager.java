@@ -1,5 +1,6 @@
 package autosummon.gui;
 
+import autosummon.util.AutoSummonLog;
 import necesse.engine.GlobalData;
 import necesse.engine.state.MainGame;
 import necesse.engine.window.WindowManager;
@@ -7,6 +8,7 @@ import necesse.entity.mobs.PlayerMob;
 
 /**
  * Manager handling the opening, closing, and toggling of the native AutoSummonForm GUI.
+ * Hardened against state transitions, window nulls, and component lifecycle errors.
  */
 public class AutoSummonGuiManager {
 
@@ -16,24 +18,28 @@ public class AutoSummonGuiManager {
      * Toggles the Auto Summon configuration GUI
      */
     public static void toggleGui() {
-        if (!(GlobalData.getCurrentState() instanceof MainGame)) {
-            return;
-        }
+        try {
+            if (!(GlobalData.getCurrentState() instanceof MainGame)) {
+                return;
+            }
 
-        MainGame mainGame = (MainGame) GlobalData.getCurrentState();
-        if (mainGame.getClient() == null) {
-            return;
-        }
+            MainGame mainGame = (MainGame) GlobalData.getCurrentState();
+            if (mainGame == null || mainGame.getClient() == null) {
+                return;
+            }
 
-        PlayerMob player = mainGame.getClient().getPlayer();
-        if (player == null) {
-            return;
-        }
+            PlayerMob player = mainGame.getClient().getPlayer();
+            if (player == null) {
+                return;
+            }
 
-        if (isGuiOpen(mainGame)) {
-            closeGui(mainGame);
-        } else {
-            openGui(mainGame, player);
+            if (isGuiOpen(mainGame)) {
+                closeGui(mainGame);
+            } else {
+                openGui(mainGame, player);
+            }
+        } catch (Throwable t) {
+            AutoSummonLog.error("Error toggling AutoSummon GUI", t);
         }
     }
 
@@ -41,29 +47,47 @@ public class AutoSummonGuiManager {
      * Open or display the Auto Summon form
      */
     public static void openGui(MainGame mainGame, PlayerMob player) {
-        if (activeForm == null) {
-            activeForm = new AutoSummonForm(player);
-        } else {
-            activeForm.refresh();
+        if (mainGame == null || player == null || mainGame.formManager == null) {
+            return;
         }
 
-        activeForm.setPosMiddle(
-            WindowManager.getWindow().getHudWidth() / 2,
-            WindowManager.getWindow().getHudHeight() / 2
-        );
+        try {
+            if (activeForm == null) {
+                activeForm = new AutoSummonForm(player);
+            } else {
+                activeForm.refresh();
+            }
 
-        if (!mainGame.formManager.hasComponent(activeForm)) {
-            mainGame.formManager.addComponent(activeForm);
+            if (WindowManager.getWindow() != null) {
+                activeForm.setPosMiddle(
+                    WindowManager.getWindow().getHudWidth() / 2,
+                    WindowManager.getWindow().getHudHeight() / 2
+                );
+            }
+
+            if (!mainGame.formManager.hasComponent(activeForm)) {
+                mainGame.formManager.addComponent(activeForm);
+            }
+            activeForm.setHidden(false);
+        } catch (Throwable t) {
+            AutoSummonLog.error("Error opening AutoSummon GUI", t);
+            closeGui(mainGame);
         }
-        activeForm.setHidden(false);
     }
 
     /**
      * Close and remove the Auto Summon form
      */
     public static void closeGui() {
-        if (GlobalData.getCurrentState() instanceof MainGame) {
-            closeGui((MainGame) GlobalData.getCurrentState());
+        try {
+            if (GlobalData.getCurrentState() instanceof MainGame) {
+                closeGui((MainGame) GlobalData.getCurrentState());
+            } else if (activeForm != null) {
+                activeForm = null;
+            }
+        } catch (Throwable t) {
+            AutoSummonLog.error("Error closing AutoSummon GUI", t);
+            activeForm = null;
         }
     }
 
@@ -71,10 +95,15 @@ public class AutoSummonGuiManager {
      * Close the form on a specific MainGame instance
      */
     public static void closeGui(MainGame mainGame) {
-        if (activeForm != null) {
-            if (mainGame != null && mainGame.formManager != null) {
-                mainGame.formManager.removeComponent(activeForm);
+        try {
+            if (activeForm != null) {
+                if (mainGame != null && mainGame.formManager != null) {
+                    mainGame.formManager.removeComponent(activeForm);
+                }
+                activeForm = null;
             }
+        } catch (Throwable t) {
+            AutoSummonLog.error("Error closing active AutoSummon form", t);
             activeForm = null;
         }
     }
@@ -83,16 +112,22 @@ public class AutoSummonGuiManager {
      * Check if the GUI is currently open
      */
     public static boolean isGuiOpen(MainGame mainGame) {
-        return activeForm != null && mainGame != null && mainGame.formManager != null 
-            && mainGame.formManager.hasComponent(activeForm) && !activeForm.isHidden();
+        try {
+            return activeForm != null && mainGame != null && mainGame.formManager != null 
+                && mainGame.formManager.hasComponent(activeForm) && !activeForm.isHidden();
+        } catch (Throwable ignored) {
+            return false;
+        }
     }
 
     /**
      * Notify the active GUI that a summon event occurred so it can update counters immediately
      */
     public static void notifySummonChanged() {
-        if (activeForm != null && !activeForm.isHidden()) {
-            activeForm.markSnapshotDirty();
-        }
+        try {
+            if (activeForm != null && !activeForm.isHidden()) {
+                activeForm.markSnapshotDirty();
+            }
+        } catch (Throwable ignored) {}
     }
 }

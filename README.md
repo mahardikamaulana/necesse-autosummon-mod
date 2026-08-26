@@ -39,6 +39,14 @@ Requires JDK 8 or higher.
 
 The compiled jar will be in `build/jar/`.
 
+## Documentation
+
+Detailed technical and developer documentation is available in the [`docs/`](docs/) directory:
+
+- [**Architecture & Technical Design**](docs/ARCHITECTURE.md) – Internal execution lifecycle, performance optimizations, bytecode patch architecture, and memory efficiency.
+- [**Compatibility Guide**](docs/COMPATIBILITY_GUIDE.md) – Guide on integrating custom summon weapons, staves, and minions using the `SummonCompatProvider` API.
+- [**Developer Guide**](docs/DEVELOPMENT.md) – Local development environment setup, build workflows, testing, and debugging.
+
 ## Credits
 
 - [brydonm](https://github.com/brydonm) - Original mod author ([necesse-autosummon-mod](https://github.com/brydonm/necesse-autosummon-mod)).

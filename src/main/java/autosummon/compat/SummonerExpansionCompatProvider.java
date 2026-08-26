@@ -1,11 +1,11 @@
 package autosummon.compat;
 
+import autosummon.util.AutoSummonLog;
 import necesse.engine.modLoader.LoadedMod;
 import necesse.engine.modLoader.ModLoader;
 import necesse.engine.registries.ItemRegistry;
 import necesse.entity.mobs.Mob;
 import necesse.entity.mobs.PlayerMob;
-import necesse.entity.mobs.WormMobBody;
 import necesse.entity.mobs.buffs.BuffModifiers;
 import necesse.inventory.InventoryItem;
 import necesse.inventory.item.Item;
@@ -14,10 +14,12 @@ import necesse.inventory.item.toolItem.summonToolItem.SummonToolItem;
 
 import java.lang.reflect.Method;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Specialized compatibility provider for the "Summoner Expansion" mod (gagadoliano.summonerexpansion).
  * Accurately classifies slot summons, secondary/follower staves with independent caps, and support sentries.
+ * Built with cached reflection, zero-allocation MobClassifier, and robust Throwable boundaries.
  */
 public class SummonerExpansionCompatProvider implements SummonCompatProvider {
 
@@ -32,7 +34,12 @@ public class SummonerExpansionCompatProvider implements SummonCompatProvider {
     // Set of item string IDs that are support staves / sentries
     private static final Set<String> SUPPORT_SUMMON_IDS = new HashSet<>();
 
-    private boolean isLoaded = false;
+    // Method reflection caches
+    private static final Map<Class<?>, Method> spaceTakenMethodCache = new ConcurrentHashMap<>();
+    private static final Map<Class<?>, Method> maxSummonsMethodCache = new ConcurrentHashMap<>();
+    private static final Set<Class<?>> unreflectiveClasses = Collections.newSetFromMap(new ConcurrentHashMap<>());
+
+    private volatile boolean isLoaded = false;
 
     static {
         // Multi-mob variant registrations
@@ -97,6 +104,7 @@ public class SummonerExpansionCompatProvider implements SummonCompatProvider {
     }
 
     private static void registerMultiMob(String itemID, String... minionIDs) {
+        if (itemID == null) return;
         MULTI_MOB_MAPPINGS.put(itemID.toLowerCase(), new HashSet<>(Arrays.asList(minionIDs)));
     }
 
@@ -134,31 +142,74 @@ public class SummonerExpansionCompatProvider implements SummonCompatProvider {
 
     @Override
     public void init() {
-        isLoaded = isModLoaded();
-        if (isLoaded) {
-            System.out.println("[Auto Summon] Summoner Expansion compatibility provider initialized!");
+        try {
+            isLoaded = isModLoaded();
+            if (isLoaded) {
+                AutoSummonLog.info("Summoner Expansion compatibility provider initialized!");
+            }
+        } catch (Throwable t) {
+            AutoSummonLog.error("Error initializing SummonerExpansionCompatProvider", t);
         }
     }
+
+    private static final Set<String> EXCLUDED_TRINKET_ITEM_IDS = new HashSet<>(Arrays.asList(
+        "willowisplantern", "minerslantern", "calmminerslantern", "magicteapot",
+        "giantbeet", "giantcarrot", "giantonion", "giantpotato", "giantpumpkin",
+        "jellyfishbowl", "livingarmorstand"
+    ));
 
     @Override
     public boolean canHandle(InventoryItem item) {
         if (item == null || item.item == null) return false;
-        String stringID = item.item.getStringID().toLowerCase();
+        try {
+            String stringID = item.item.getStringID();
+            if (stringID == null) return false;
+            String lowerID = stringID.toLowerCase();
 
-        // 1. Direct ID match from known SummonerExpansion items
-        if (MULTI_MOB_MAPPINGS.containsKey(stringID) || SECONDARY_SUMMON_IDS.contains(stringID) || SUPPORT_SUMMON_IDS.contains(stringID)) {
-            return true;
+            // Exclude trinket items that spawn companion followers
+            if (EXCLUDED_TRINKET_ITEM_IDS.contains(lowerID)) {
+                return false;
+            }
+
+            // 1. Direct ID match from known SummonerExpansion items
+            if (MULTI_MOB_MAPPINGS.containsKey(lowerID) || SECONDARY_SUMMON_IDS.contains(lowerID) || SUPPORT_SUMMON_IDS.contains(lowerID)) {
+                return true;
+            }
+
+            // 2. Class hierarchy match for valid summon staves / support tools
+            if (item.item instanceof SummonToolItem) {
+                return true;
+            }
+
+            String className = item.item.getClass().getName();
+            // Explicitly exclude melee, ranged, claws, swords, whips, and boomerangs
+            if (className.contains("weapons.melee") || className.contains("weapons.ranged")
+                || className.contains("BaseDruidClaw") || className.contains("BaseWhipWeapon")
+                || className.contains("BaseSummonSword") || className.contains("BaseSummonBoomerang")) {
+                return false;
+            }
+
+            return className.contains("BaseSummonWeapon")
+                || className.contains("BaseSupportWeapon")
+                || className.contains("BaseSummonSecondary")
+                || className.contains("BaseMagicTools")
+                || className.contains("BaseSeedPack")
+                || className.startsWith("summonerexpansion.items.weapons.magic");
+        } catch (Throwable t) {
+            AutoSummonLog.logThrottledError("se_canHandle", "Error checking canHandle for item", t, 5000);
+            return false;
         }
-
-        // 2. Class hierarchy match (e.g. BaseSummonWeapon, BaseSupportWeapon)
-        String className = item.item.getClass().getName();
-        return className.startsWith("summonerexpansion.items.weapons");
     }
 
     @Override
     public SummonWeaponAdapter createAdapter(InventoryItem item) {
         if (item == null || item.item == null) return null;
-        return new SummonerExpansionWeaponAdapter(item.item);
+        try {
+            return new SummonerExpansionWeaponAdapter(item.item);
+        } catch (Throwable t) {
+            AutoSummonLog.error("Failed to create SummonerExpansionWeaponAdapter for item", t);
+            return null;
+        }
     }
 
     public static class SummonerExpansionWeaponAdapter implements SummonWeaponAdapter {
@@ -170,11 +221,17 @@ public class SummonerExpansionCompatProvider implements SummonCompatProvider {
 
         public SummonerExpansionWeaponAdapter(Item itemObj) {
             this.itemObj = itemObj;
-            this.stringID = itemObj.getStringID().toLowerCase();
+            String id = "";
+            try {
+                if (itemObj != null && itemObj.getStringID() != null) {
+                    id = itemObj.getStringID().toLowerCase();
+                }
+            } catch (Throwable ignored) {}
+            this.stringID = id;
             this.matchingMinionIDs = MULTI_MOB_MAPPINGS.getOrDefault(this.stringID, Collections.emptySet());
 
             boolean secondaryCheck = SECONDARY_SUMMON_IDS.contains(this.stringID);
-            String className = itemObj.getClass().getName();
+            String className = itemObj != null ? itemObj.getClass().getName() : "";
             if (!secondaryCheck && (className.contains("BaseSummonSecondary") || className.contains("BaseMagicTools") || className.contains("Secondary"))) {
                 secondaryCheck = true;
             }
@@ -197,103 +254,154 @@ public class SummonerExpansionCompatProvider implements SummonCompatProvider {
 
         @Override
         public String getItemStringID() {
-            return itemObj.getStringID();
+            try {
+                if (itemObj != null && itemObj.getStringID() != null) {
+                    return itemObj.getStringID();
+                }
+            } catch (Throwable ignored) {}
+            return stringID;
         }
 
         @Override
         public String getDisplayName(InventoryItem item) {
-            return item != null ? item.getItemDisplayName() : itemObj.getStringID();
+            try {
+                if (item != null) {
+                    return item.getItemDisplayName();
+                }
+            } catch (Throwable ignored) {}
+            return itemObj != null ? itemObj.getStringID() : "Unknown SE Staff";
         }
 
         @Override
         public boolean isGlobalSlotWeapon(InventoryItem item, PlayerMob player) {
-            // Secondary summons and support sentries NEVER consume global player summon slots
-            if (isSecondary || isSupport) {
-                return false;
-            }
-            if (itemObj instanceof SummonToolItem) {
-                SummonToolItem staff = (SummonToolItem) itemObj;
-                boolean isStandardSummonMob = staff.summonType == null || staff.summonType.equalsIgnoreCase("summonedmob");
-                return staff.drawMaxSummons && isStandardSummonMob;
+            try {
+                // Secondary summons and support sentries NEVER consume global player summon slots
+                if (isSecondary || isSupport) {
+                    return false;
+                }
+                if (itemObj instanceof SummonToolItem) {
+                    SummonToolItem staff = (SummonToolItem) itemObj;
+                    boolean isStandardSummonMob = staff.summonType == null || staff.summonType.equalsIgnoreCase("summonedmob");
+                    return staff.drawMaxSummons && isStandardSummonMob;
+                }
+            } catch (Throwable t) {
+                AutoSummonLog.logThrottledError("se_isGlobalSlotWeapon_" + stringID, "Error in isGlobalSlotWeapon for " + stringID, t, 5000);
             }
             return false;
         }
 
         @Override
         public float getSummonSpaceCost(InventoryItem item, PlayerMob player) {
+            if (itemObj == null) return 1.0f;
+
             // Hungry Mimic takes all available player summon capacity
             if ("hungrymimic".equalsIgnoreCase(stringID)) {
-                return player != null && player.buffManager != null
-                    ? (float) player.buffManager.getModifier(BuffModifiers.MAX_SUMMONS)
-                    : 1.0f;
+                try {
+                    return player != null && player.buffManager != null
+                        ? (float) player.buffManager.getModifier(BuffModifiers.MAX_SUMMONS)
+                        : 1.0f;
+                } catch (Throwable ignored) {
+                    return 1.0f;
+                }
             }
 
             if (itemObj instanceof SummonToolItem) {
                 try {
-                    return ((SummonToolItem) itemObj).getSummonSpaceTaken(item, player);
-                } catch (Exception ignored) {}
+                    float cost = ((SummonToolItem) itemObj).getSummonSpaceTaken(item, player);
+                    if (!Float.isNaN(cost) && !Float.isInfinite(cost) && cost > 0) {
+                        return cost;
+                    }
+                } catch (Throwable ignored) {}
             }
 
-            // Reflection fallback for BaseSupportWeapon / custom weapons
-            try {
-                Method m = itemObj.getClass().getMethod("getSummonSpaceTaken", InventoryItem.class, necesse.entity.mobs.itemAttacker.ItemAttackerMob.class);
-                Object res = m.invoke(itemObj, item, player);
-                if (res instanceof Float) {
-                    return (Float) res;
+            // Cached reflection lookup for custom summon weapons
+            Class<?> clazz = itemObj.getClass();
+            if (!unreflectiveClasses.contains(clazz)) {
+                try {
+                    Method m = spaceTakenMethodCache.get(clazz);
+                    if (m == null) {
+                        m = clazz.getMethod("getSummonSpaceTaken", InventoryItem.class, necesse.entity.mobs.itemAttacker.ItemAttackerMob.class);
+                        spaceTakenMethodCache.put(clazz, m);
+                    }
+                    Object res = m.invoke(itemObj, item, player);
+                    if (res instanceof Float) {
+                        float cost = (Float) res;
+                        if (!Float.isNaN(cost) && !Float.isInfinite(cost) && cost > 0) {
+                            return cost;
+                        }
+                    }
+                } catch (NoSuchMethodException e) {
+                    unreflectiveClasses.add(clazz);
+                } catch (Throwable t) {
+                    AutoSummonLog.logThrottledError("se_spaceTaken_reflect_" + stringID, "Reflection error invoking getSummonSpaceTaken for " + stringID, t, 5000);
                 }
-            } catch (Exception ignored) {}
+            }
 
             return 1.0f;
         }
 
         @Override
         public int getMaxAllowed(InventoryItem item, PlayerMob player, int playerMaxSummons) {
-            if (isGlobalSlotWeapon(item, player)) {
-                float cost = getSummonSpaceCost(item, player);
-                if (cost <= 0) cost = 1.0f;
-                return Math.max(1, (int) Math.floor(playerMaxSummons / cost));
-            } else {
-                // Secondary summon or dedicated follower staff: use weapon's own getMaxSummons
-                try {
+            if (itemObj == null) return 1;
+            try {
+                if (isGlobalSlotWeapon(item, player)) {
+                    if (playerMaxSummons <= 0) return 0;
+                    float cost = getSummonSpaceCost(item, player);
+                    if (cost <= 0) cost = 1.0f;
+                    return Math.max(1, (int) Math.floor(playerMaxSummons / cost));
+                } else {
+                    // Secondary summon or dedicated follower staff: use weapon's own getMaxSummons
                     if (itemObj instanceof SummonToolItem) {
                         return Math.max(1, ((SummonToolItem) itemObj).getMaxSummons(item, player));
                     }
-                    Method m = itemObj.getClass().getMethod("getMaxSummons", InventoryItem.class, necesse.entity.mobs.itemAttacker.ItemAttackerMob.class);
+                    Class<?> clazz = itemObj.getClass();
+                    Method m = maxSummonsMethodCache.get(clazz);
+                    if (m == null) {
+                        m = clazz.getMethod("getMaxSummons", InventoryItem.class, necesse.entity.mobs.itemAttacker.ItemAttackerMob.class);
+                        maxSummonsMethodCache.put(clazz, m);
+                    }
                     Object res = m.invoke(itemObj, item, player);
                     if (res instanceof Integer) {
                         return Math.max(1, (Integer) res);
                     }
-                } catch (Exception ignored) {}
-                return 1;
+                }
+            } catch (NoSuchMethodException ignored) {
+            } catch (Throwable t) {
+                AutoSummonLog.logThrottledError("se_maxAllowed_" + stringID, "Error calculating max allowed for " + stringID, t, 5000);
             }
+            return 1;
         }
 
         @Override
         public boolean isMatchingMinion(Mob mob, InventoryItem item) {
-            if (mob == null || mob.removed() || mob.getHealth() <= 0) return false;
-            if (mob instanceof WormMobBody) return false;
+            if (mob == null || mob.removed() || mob.getHealth() <= 0 || itemObj == null) return false;
+            if (MobClassifier.isIgnoredFollower(mob)) return false;
 
-            String mobStringID = mob.getStringID();
-            if (mobStringID == null) return false;
+            try {
+                String mobStringID = mob.getStringID();
+                if (mobStringID == null) return false;
+                String mobLower = mobStringID.toLowerCase();
 
-            // 1. Direct multi-mob dictionary match
-            if (!matchingMinionIDs.isEmpty() && matchingMinionIDs.contains(mobStringID.toLowerCase())) {
-                return true;
-            }
+                // 1. Direct multi-mob dictionary match
+                if (!matchingMinionIDs.isEmpty() && matchingMinionIDs.contains(mobLower)) {
+                    return true;
+                }
 
-            // 2. Standard SummonToolItem checks
-            if (itemObj instanceof SummonToolItem) {
-                SummonToolItem staff = (SummonToolItem) itemObj;
-                if (staff.mobStringID != null) {
-                    String staffLower = staff.mobStringID.toLowerCase();
-                    String mobLower = mobStringID.toLowerCase();
-                    if (mobLower.equals(staffLower) || (mobLower.startsWith(staffLower) && !staffLower.isEmpty())) {
+                // 2. Standard SummonToolItem checks
+                if (itemObj instanceof SummonToolItem) {
+                    SummonToolItem staff = (SummonToolItem) itemObj;
+                    if (staff.mobStringID != null) {
+                        String staffLower = staff.mobStringID.toLowerCase();
+                        if (mobLower.equals(staffLower) || (mobLower.startsWith(staffLower) && !staffLower.isEmpty())) {
+                            return true;
+                        }
+                    }
+                    if (staff.summonType != null && staff.summonType.equalsIgnoreCase(mobStringID)) {
                         return true;
                     }
                 }
-                if (staff.summonType != null && staff.summonType.equalsIgnoreCase(mobStringID)) {
-                    return true;
-                }
+            } catch (Throwable t) {
+                AutoSummonLog.logThrottledError("se_isMatchingMinion_" + stringID, "Error matching minion for " + stringID, t, 5000);
             }
 
             return false;
@@ -301,11 +409,16 @@ public class SummonerExpansionCompatProvider implements SummonCompatProvider {
 
         @Override
         public String canAttack(PlayerMob player, InventoryItem item) {
-            if (player == null || player.getLevel() == null || item == null) {
+            if (player == null || player.getLevel() == null || item == null || itemObj == null) {
                 return "Invalid state";
             }
-            if (itemObj instanceof ToolItem) {
-                return ((ToolItem) itemObj).canAttack(player.getLevel(), (int) player.getX(), (int) player.getY(), player, item);
+            try {
+                if (itemObj instanceof ToolItem) {
+                    return ((ToolItem) itemObj).canAttack(player.getLevel(), (int) player.getX(), (int) player.getY(), player, item);
+                }
+            } catch (Throwable t) {
+                AutoSummonLog.logThrottledError("se_canAttack_" + stringID, "Error checking canAttack for " + stringID, t, 5000);
+                return "Attack check failed";
             }
             return null;
         }
@@ -335,16 +448,20 @@ public class SummonerExpansionCompatProvider implements SummonCompatProvider {
 
         @Override
         public String getWeaponTypeDisplay(InventoryItem item, PlayerMob player, int maxAllowed) {
-            if (isSecondary) {
-                return "Follower (Cap: " + maxAllowed + ")";
-            } else if (isSupport) {
-                return "Sentry (Cap: " + maxAllowed + ")";
-            } else if (isGlobalSlotWeapon(item, player)) {
-                float spaceCost = getSummonSpaceCost(item, player);
-                String costDisplay = (spaceCost == (int) spaceCost) ? String.valueOf((int) spaceCost) : String.format("%.1f", spaceCost);
-                return costDisplay + " slot(s)/summon (Max: " + maxAllowed + ")";
-            } else {
-                return "Follower (Cap: " + maxAllowed + ")";
+            try {
+                if (isSecondary) {
+                    return "Follower (Cap: " + maxAllowed + ")";
+                } else if (isSupport) {
+                    return "Sentry (Cap: " + maxAllowed + ")";
+                } else if (isGlobalSlotWeapon(item, player)) {
+                    float spaceCost = getSummonSpaceCost(item, player);
+                    String costDisplay = (spaceCost == (int) spaceCost) ? String.valueOf((int) spaceCost) : String.format("%.1f", spaceCost);
+                    return costDisplay + " slot(s)/summon (Max: " + maxAllowed + ")";
+                } else {
+                    return "Follower (Cap: " + maxAllowed + ")";
+                }
+            } catch (Throwable t) {
+                return "Summon (Cap: " + maxAllowed + ")";
             }
         }
     }
