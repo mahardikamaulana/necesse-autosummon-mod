@@ -1,7 +1,9 @@
 package autosummon.compat;
 
+import autosummon.gui.AutoSummonTheme;
 import necesse.entity.mobs.Mob;
 import necesse.entity.mobs.PlayerMob;
+import necesse.gfx.ui.GameInterfaceStyle;
 import necesse.inventory.InventoryItem;
 
 import java.awt.Color;
@@ -31,6 +33,20 @@ public interface SummonWeaponAdapter {
             this.sectionHeaderColor = sectionHeaderColor;
             this.badgeText = badgeText;
             this.badgeColor = badgeColor;
+        }
+
+        /**
+         * Resolves the section header color dynamically adapted to the active theme's contrast.
+         */
+        public Color getHeaderColor(GameInterfaceStyle style) {
+            return AutoSummonTheme.getCategoryHeaderColor(this, style);
+        }
+
+        /**
+         * Resolves the badge color dynamically adapted to the active theme's contrast.
+         */
+        public Color getBadgeColor(GameInterfaceStyle style) {
+            return AutoSummonTheme.getCategoryBadgeColor(this, style);
         }
     }
 

@@ -32,6 +32,10 @@ public class AutoSummonMod {
     public void postInit() {
         try {
             autosummon.compat.SummonCompatRegistry.init();
+            
+            // Optional registration with CustomSettingsLib if installed
+            autosummon.compat.CustomSettingsLibBridge.tryRegisterSettings(AutoSummonConfig.getSettings());
+
             AutoSummonLog.info("Auto Summon Mod initialization complete!");
         } catch (Throwable t) {
             AutoSummonLog.error("Error during AutoSummonMod.postInit()", t);

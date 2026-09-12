@@ -419,6 +419,10 @@ public class AutoSummonPatch {
      */
     @Advice.OnMethodExit
     public static void onExit(@Advice.This PlayerMob player) {
+        handleClientTick(player);
+    }
+
+    public static void handleClientTick(PlayerMob player) {
         try {
             // Fast-path 1: Mod disabled
             if (!AutoSummonConfig.isEnabled()) {

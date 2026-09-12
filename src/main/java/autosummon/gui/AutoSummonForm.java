@@ -22,6 +22,7 @@ import necesse.gfx.forms.components.FormLabel;
 import necesse.gfx.forms.components.FormTextButton;
 import necesse.gfx.gameFont.FontOptions;
 import necesse.gfx.ui.ButtonColor;
+import necesse.gfx.ui.GameInterfaceStyle;
 import necesse.inventory.InventoryItem;
 import necesse.inventory.item.toolItem.summonToolItem.SummonToolItem;
 
@@ -45,6 +46,7 @@ public class AutoSummonForm extends Form {
     private FormContentBox contentBox;
     private FormLabel capacitySummaryLabel;
     private FormCheckBox enableToggle;
+    private GameInterfaceStyle lastAppliedStyle;
 
     private final List<WeaponRowUI> weaponRowUIs = new ArrayList<>();
     private List<HotbarSummonEntry> currentHotbarEntries = new ArrayList<>();
@@ -74,8 +76,11 @@ public class AutoSummonForm extends Form {
             clearComponents();
             weaponRowUIs.clear();
 
-            // 1. Header & Title (16px left margin)
-            addComponent(new FormLabel("Auto Summon Configuration", new FontOptions(18), FormLabel.ALIGN_LEFT, 16, 8, getWidth() - 56));
+            GameInterfaceStyle style = AutoSummonTheme.getActiveStyle(this);
+            this.lastAppliedStyle = style;
+
+            // 1. Header & Title (16px left margin, theme-adapted high-contrast text)
+            addComponent(new FormLabel("Auto Summon Configuration", new FontOptions(18).color(AutoSummonTheme.getTitleColor(style)), FormLabel.ALIGN_LEFT, 16, 8, getWidth() - 56));
             
             FormTextButton closeHeaderBtn = addComponent(new FormTextButton("X", getWidth() - 36, 6, 24, FormInputSize.SIZE_24, ButtonColor.BASE));
             closeHeaderBtn.onClicked(e -> AutoSummonGuiManager.closeGui());
@@ -100,16 +105,18 @@ public class AutoSummonForm extends Form {
                 }
             });
 
-            capacitySummaryLabel = addComponent(new FormLabel("Loading capacity...", new FontOptions(12).color(new Color(40, 40, 40)), FormLabel.ALIGN_LEFT, 16, 60, getWidth() - 32));
+            capacitySummaryLabel = addComponent(new FormLabel("Loading capacity...", new FontOptions(12).color(AutoSummonTheme.getSecondaryTextColor(style)), FormLabel.ALIGN_LEFT, 16, 60, getWidth() - 32));
 
-            addComponent(new FormBreakLine(FormBreakLine.ALIGN_BEGINNING, 12, 80, getWidth() - 24, true));
+            FormBreakLine headerLine = addComponent(new FormBreakLine(FormBreakLine.ALIGN_BEGINNING, 12, 80, getWidth() - 24, true));
+            headerLine.color = AutoSummonTheme.getDividerColor(style);
 
             // 3. Scrollable List of Hotbar Summon Weapons
             contentBox = addComponent(new FormContentBox(6, 86, getWidth() - 12, getHeight() - 86 - 46));
             populateWeaponList();
 
             // 4. Footer Controls (16px margins on left & right)
-            addComponent(new FormBreakLine(FormBreakLine.ALIGN_BEGINNING, 12, getHeight() - 44, getWidth() - 24, true));
+            FormBreakLine footerLine = addComponent(new FormBreakLine(FormBreakLine.ALIGN_BEGINNING, 12, getHeight() - 44, getWidth() - 24, true));
+            footerLine.color = AutoSummonTheme.getDividerColor(style);
 
             FormTextButton resetAllBtn = addComponent(new FormTextButton("Reset All Limits", 16, getHeight() - 36, 140, FormInputSize.SIZE_24, ButtonColor.BASE));
             resetAllBtn.onClicked(e -> {
@@ -328,6 +335,15 @@ public class AutoSummonForm extends Form {
     @Override
     public void draw(TickManager tickManager, PlayerMob player, Rectangle rectangle) {
         try {
+            GameInterfaceStyle currentStyle = AutoSummonTheme.getActiveStyle(this);
+            if (AutoSummonTheme.hasThemeChanged(currentStyle, lastAppliedStyle)) {
+                this.lastAppliedStyle = currentStyle;
+                initFormComponents();
+            }
+        } catch (Throwable t) {
+            AutoSummonLog.logThrottledError("gui_theme_sync", "Error syncing theme in GUI draw", t, 5000);
+        }
+        try {
             updateLiveCounters(player);
         } catch (Throwable t) {
             AutoSummonLog.logThrottledError("gui_draw_update", "Error during AutoSummonForm.draw() counter update", t, 5000);
@@ -352,8 +368,9 @@ public class AutoSummonForm extends Form {
             lastHotbarFingerprint = computeHotbarFingerprint();
 
             if (currentHotbarEntries.isEmpty()) {
-                contentBox.addComponent(new FormLabel("No summon weapons found in hotbar.", new FontOptions(14).color(new Color(130, 70, 20)), FormLabel.ALIGN_LEFT, 12, 20, contentBox.getWidth() - 24));
-                contentBox.addComponent(new FormLabel("Place summon weapons in hotbar slots 1-10 to customize their individual summon limits.", new FontOptions(12).color(new Color(60, 50, 40)), FormLabel.ALIGN_LEFT, 12, 44, contentBox.getWidth() - 24));
+                GameInterfaceStyle style = AutoSummonTheme.getActiveStyle(this);
+                contentBox.addComponent(new FormLabel("No summon weapons found in hotbar.", new FontOptions(14).color(AutoSummonTheme.getEmptyNoticeColor(style)), FormLabel.ALIGN_LEFT, 12, 20, contentBox.getWidth() - 24));
+                contentBox.addComponent(new FormLabel("Place summon weapons in hotbar slots 1-10 to customize their individual summon limits.", new FontOptions(12).color(AutoSummonTheme.getSecondaryTextColor(style)), FormLabel.ALIGN_LEFT, 12, 44, contentBox.getWidth() - 24));
                 contentBox.setContentBox(new Rectangle(0, 0, contentBox.getWidth(), 120));
                 if (capacitySummaryLabel != null) {
                     SummonSnapshot emptySnapshot = computeSnapshot(currentHotbarEntries);
@@ -415,9 +432,11 @@ public class AutoSummonForm extends Form {
         int currentY = startY;
 
         try {
-            // Section header banner (Sentry uses Red)
+            GameInterfaceStyle style = AutoSummonTheme.getActiveStyle(this);
+
+            // Section header banner (Theme-adapted category color)
             String headerText = "--- " + (category != null ? category.sectionTitle : "SUMMON WEAPONS") + " ---";
-            Color headerColor = category != null ? category.sectionHeaderColor : new Color(30, 90, 180);
+            Color headerColor = AutoSummonTheme.getCategoryHeaderColor(category, style);
             contentBox.addComponent(new FormLabel(headerText, new FontOptions(12).color(headerColor), FormLabel.ALIGN_LEFT, 10, currentY + 2, contentBox.getWidth() - 20));
             currentY += 22;
 
@@ -445,14 +464,14 @@ public class AutoSummonForm extends Form {
                 final int maxAllowed = Math.max(1, adapter.getMaxAllowed(item, player, playerMaxSlots));
                 int configuredLimit = settings != null ? settings.getWeaponSummonLimit(itemID) : 0;
 
-                // Name & Slot label
+                // Name & Slot label (high-contrast primary text)
                 String titleText = "[Slot " + (slot + 1) + "] " + adapter.getDisplayName(item);
-                FormLabel titleLabel = contentBox.addComponent(new FormLabel(titleText, new FontOptions(13).color(new Color(30, 30, 30)), FormLabel.ALIGN_LEFT, 46, currentY + 4, textMaxWidth));
+                FormLabel titleLabel = contentBox.addComponent(new FormLabel(titleText, new FontOptions(13).color(AutoSummonTheme.getPrimaryTextColor(style)), FormLabel.ALIGN_LEFT, 46, currentY + 4, textMaxWidth));
                 int titleHeight = Math.max(14, titleLabel.getHeight());
 
-                // Status label placed directly beneath title with dynamic offset (neutral text)
+                // Status label placed directly beneath title with dynamic offset (theme-adapted secondary text)
                 int statusY = currentY + 4 + titleHeight + 2;
-                FormLabel statusLabel = contentBox.addComponent(new FormLabel("Calculating...", new FontOptions(11).color(new Color(60, 50, 40)), FormLabel.ALIGN_LEFT, 46, statusY, textMaxWidth));
+                FormLabel statusLabel = contentBox.addComponent(new FormLabel("Calculating...", new FontOptions(11).color(AutoSummonTheme.getSecondaryTextColor(style)), FormLabel.ALIGN_LEFT, 46, statusY, textMaxWidth));
                 int statusHeight = Math.max(12, statusLabel.getHeight());
 
                 // Register holder for real-time updates
@@ -500,17 +519,17 @@ public class AutoSummonForm extends Form {
                 Color limitColor;
                 if (configuredLimit == -1) {
                     limitText = "Off";
-                    limitColor = new Color(180, 40, 40);
+                    limitColor = AutoSummonTheme.getDisabledLimitColor(style);
                 } else if (configuredLimit > 0) {
                     limitText = String.valueOf(configuredLimit);
                     if (configuredLimit <= maxAllowed) {
-                        limitColor = new Color(20, 130, 20);
+                        limitColor = AutoSummonTheme.getActiveLimitColor(style);
                     } else {
-                        limitColor = new Color(20, 100, 200);
+                        limitColor = AutoSummonTheme.getOverCapLimitColor(style);
                     }
                 } else {
                     limitText = "Auto";
-                    limitColor = new Color(40, 40, 40);
+                    limitColor = AutoSummonTheme.getAutoLimitColor(style);
                 }
 
                 // Perfectly centered at counterCenterX with ALIGN_MID
@@ -554,7 +573,8 @@ public class AutoSummonForm extends Form {
 
                 // Row separator line
                 currentY += rowHeight;
-                contentBox.addComponent(new FormBreakLine(FormBreakLine.ALIGN_BEGINNING, 8, currentY - 2, contentBox.getWidth() - 16, true));
+                FormBreakLine rowDivider = contentBox.addComponent(new FormBreakLine(FormBreakLine.ALIGN_BEGINNING, 8, currentY - 2, contentBox.getWidth() - 16, true));
+                rowDivider.color = AutoSummonTheme.getDividerColor(style);
             }
 
             currentY += 4;
@@ -613,6 +633,12 @@ public class AutoSummonForm extends Form {
      */
     public void refresh() {
         try {
+            GameInterfaceStyle currentStyle = AutoSummonTheme.getActiveStyle(this);
+            if (AutoSummonTheme.hasThemeChanged(currentStyle, lastAppliedStyle)) {
+                this.lastAppliedStyle = currentStyle;
+                initFormComponents();
+                return;
+            }
             if (enableToggle != null) {
                 enableToggle.checked = AutoSummonConfig.isEnabled();
             }
