@@ -1,5 +1,6 @@
 package autosummon.gui;
 
+import autosummon.AutoSummonConfig;
 import autosummon.util.AutoSummonLog;
 import necesse.engine.GlobalData;
 import necesse.engine.state.MainGame;
@@ -40,6 +41,33 @@ public class AutoSummonGuiManager {
             }
         } catch (Throwable t) {
             AutoSummonLog.error("Error toggling AutoSummon GUI", t);
+        }
+    }
+
+    /**
+     * Toggles auto summon globally, announces the new state in chat and syncs the open GUI
+     */
+    public static void toggleEnabled() {
+        try {
+            if (!(GlobalData.getCurrentState() instanceof MainGame)) {
+                return;
+            }
+
+            MainGame mainGame = (MainGame) GlobalData.getCurrentState();
+            if (mainGame == null || mainGame.getClient() == null) {
+                return;
+            }
+
+            AutoSummonConfig.toggle();
+
+            if (mainGame.getClient().chat != null) {
+                mainGame.getClient().chat.addMessage("[Auto Summon] " + (AutoSummonConfig.isEnabled() ? "ON" : "OFF"));
+            }
+            if (isGuiOpen(mainGame)) {
+                activeForm.refresh();
+            }
+        } catch (Throwable t) {
+            AutoSummonLog.error("Error toggling auto summon", t);
         }
     }
 

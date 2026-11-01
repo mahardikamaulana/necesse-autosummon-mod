@@ -20,6 +20,9 @@ public class AutoSummonConfig {
     // Control for opening auto-summon settings GUI
     public static necesse.engine.input.Control SETTINGS_CONTROL;
     
+    // Control for enabling/disabling auto summon globally
+    public static necesse.engine.input.Control TOGGLE_CONTROL;
+    
     /**
      * Initialize settings
      */
@@ -119,6 +122,13 @@ public class AutoSummonConfig {
             );
         } catch (Throwable t) {
             AutoSummonLog.error("Failed to register AutoSummonSettingsControl", t);
+        }
+        try {
+            TOGGLE_CONTROL = necesse.engine.input.Control.addModControl(
+                new AutoSummonToggleControl() // F10 key
+            );
+        } catch (Throwable t) {
+            AutoSummonLog.error("Failed to register AutoSummonToggleControl", t);
         }
     }
     

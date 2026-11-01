@@ -19,6 +19,7 @@ Tired of manually spam-recasting all your minions every time you die, travel bet
 ## Controls
 
 - **F9**: Open / close the Auto Summon configuration menu (rebindable in Necesse's Controls settings).
+- **F10**: Enable / disable auto-summoning globally (rebindable in Necesse's Controls settings).
 
 ## Installation
 

@@ -40,6 +40,20 @@ public class AutoSummonModSettingsTest {
     }
 
     @Test
+    @DisplayName("Global toggle should flip the shared enabled state both ways")
+    public void testGlobalToggle() {
+        boolean initial = AutoSummonConfig.isEnabled();
+        try {
+            AutoSummonConfig.toggle();
+            assertEquals(!initial, AutoSummonConfig.isEnabled());
+            AutoSummonConfig.toggle();
+            assertEquals(initial, AutoSummonConfig.isEnabled());
+        } finally {
+            AutoSummonConfig.getSettings().setEnabled(initial);
+        }
+    }
+
+    @Test
     @DisplayName("Per-weapon summon limits should store, retrieve, case-insensitively match, and reset correctly")
     public void testWeaponSummonLimits() {
         // Auto (0) by default
