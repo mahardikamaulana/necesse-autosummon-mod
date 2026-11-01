@@ -25,7 +25,7 @@ gradle.properties.local
 
 # Local mods folder
 mods/
-
+.omc/
 # Project specific
 steam_appid.txt
 latest-crash.log
